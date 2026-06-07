@@ -1,8 +1,9 @@
 use std::{
     fmt, fs,
     io::{self, BufRead, BufReader, Read, Write},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, ToSocketAddrs},
     path::{Component, PathBuf},
+    time::Duration,
 };
 
 use thiserror::Error;
@@ -340,7 +341,15 @@ pub fn serve_stream(mut stream: TcpStream, resolver: &impl PageResolver) -> Resu
 }
 
 pub fn fetch_tcp(url: &JaringanUrl) -> Result<Response, WireError> {
-    let mut stream = TcpStream::connect((url.host(), url.port_or_default()))?;
+    fetch_tcp_with_timeout(url, Duration::from_secs(5))
+}
+
+pub fn fetch_tcp_with_timeout(url: &JaringanUrl, timeout: Duration) -> Result<Response, WireError> {
+    let mut addrs = (url.host(), url.port_or_default()).to_socket_addrs()?;
+    let addr = addrs.next().ok_or(WireError::BadAddress)?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
     writeln!(stream, "GET {} JRG/0.1", url.as_str())?;
     writeln!(stream, "Host: {}", url.authority())?;
     writeln!(stream)?;
@@ -452,6 +461,8 @@ pub enum WireError {
     BadRequest,
     #[error("bad Jaringan wire response")]
     BadResponse,
+    #[error("could not resolve Jaringan host")]
+    BadAddress,
 }
 
 #[cfg(test)]
@@ -571,5 +582,28 @@ mod tests {
         assert_eq!(response.status, StatusCode::Ok);
         assert_eq!(response.content_type, ContentType::JaringanPage);
         assert_eq!(response.body, "# TCP Home\n");
+    }
+
+    #[test]
+    fn tcp_client_times_out_when_server_does_not_respond() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        });
+
+        let started = std::time::Instant::now();
+        let error = fetch_tcp_with_timeout(
+            &JaringanUrl::parse(&format!("jrg://{addr}/")).unwrap(),
+            std::time::Duration::from_millis(25),
+        )
+        .unwrap_err();
+        server.join().unwrap();
+
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        assert!(
+            matches!(error, WireError::Io(error) if error.kind() == io::ErrorKind::WouldBlock || error.kind() == io::ErrorKind::TimedOut)
+        );
     }
 }

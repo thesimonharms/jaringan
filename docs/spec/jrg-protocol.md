@@ -90,7 +90,10 @@ Prototype commands:
 ```bash
 cargo run -p jaringan-browser -- serve docs/examples --bind 127.0.0.1:7070
 cargo run -p jaringan-browser -- get jrg://127.0.0.1:7070/
+cargo run -p jaringan-browser -- get --follow jrg://127.0.0.1:7070/
 ```
+
+TCP clients use bounded connect/read/write timeouts so an unresponsive origin cannot hang indefinitely.
 
 ## Request
 
@@ -149,7 +152,7 @@ Redirects are represented as tags instead of magic browser behavior:
 ResponseTag::Redirect { target }
 ```
 
-The prototype terminal browser follows redirect tags automatically for `jrg://` pages, resolving relative redirect targets against the current page URL and stopping after a small redirect limit. The lower-level `get` command prints the response and does not follow redirects.
+The prototype terminal browser follows redirect tags automatically for `jrg://` pages, resolving relative redirect targets against the current page URL and stopping after a small redirect limit. The lower-level `get` command prints the response as-is by default; `get --follow` follows redirect tags before printing the final response.
 
 ## Local resolver
 
@@ -166,6 +169,6 @@ Query strings and fragments are accepted by the URL parser but ignored by the lo
 
 - No search/discovery.
 - No identity or signatures.
-- No redirect safety UI yet; the prototype browser follows redirects automatically.
+- No redirect safety UI yet; the prototype browser and `get --follow` follow redirects automatically.
 - No content negotiation beyond basic content type enums.
 - No TLS yet.

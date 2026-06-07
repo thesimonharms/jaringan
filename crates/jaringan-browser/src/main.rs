@@ -47,7 +47,12 @@ enum Command {
     /// Fetch a jrg:// URL from a local document root using protocol path rules.
     Fetch { root: PathBuf, url: String },
     /// Fetch a jrg:// URL over the TCP wire protocol.
-    Get { url: String },
+    Get {
+        url: String,
+        /// Follow Tag-Redirect responses before printing the final response.
+        #[arg(long)]
+        follow: bool,
+    },
     /// Serve a local document root over the TCP wire protocol.
     Serve {
         root: PathBuf,
@@ -89,9 +94,13 @@ fn main() -> anyhow::Result<()> {
             let response = resolver.fetch(&Request::new(url))?;
             print_response(response);
         }
-        Command::Get { url } => {
+        Command::Get { url, follow } => {
             let url = JaringanUrl::parse(&url)?;
-            let response = fetch_tcp(&url)?;
+            let response = if follow {
+                fetch_response_following_redirects(url)?.1
+            } else {
+                fetch_tcp(&url)?
+            };
             print_response(response);
         }
         Command::Serve { root, bind } => {
@@ -120,6 +129,28 @@ fn print_response(response: Response) {
     }
     println!();
     print!("{}", response.body);
+}
+
+fn fetch_response_following_redirects(
+    mut url: JaringanUrl,
+) -> anyhow::Result<(JaringanUrl, Response)> {
+    const MAX_REDIRECTS: usize = 5;
+
+    for redirect_count in 0..=MAX_REDIRECTS {
+        let response = fetch_tcp(&url)?;
+        let Some(target) = redirect_target(&response) else {
+            return Ok((url, response));
+        };
+
+        if redirect_count == MAX_REDIRECTS {
+            bail!("too many redirects while fetching {url}");
+        }
+        url = url
+            .resolve(target)
+            .with_context(|| format!("bad redirect target `{target}` while fetching {url}"))?;
+    }
+
+    unreachable!("redirect loop exits by returning once MAX_REDIRECTS is reached")
 }
 
 fn run_tui(target: String) -> anyhow::Result<()> {
@@ -662,5 +693,26 @@ mod tests {
 
         assert!(lines.contains("Network error"));
         assert!(lines.contains("jrg://127.0.0.1:1/missing.jrg"));
+    }
+
+    #[test]
+    fn cli_fetch_follow_redirects_returns_final_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let resolver = RedirectResolver;
+            jaringan_protocol::serve_one(listener.try_clone().unwrap(), resolver.clone()).unwrap();
+            jaringan_protocol::serve_one(listener, resolver).unwrap();
+        });
+
+        let (final_url, response) = fetch_response_following_redirects(
+            JaringanUrl::parse(&format!("jrg://{addr}/old.jrg")).unwrap(),
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(final_url.as_str(), format!("jrg://{addr}/new.jrg"));
+        assert_eq!(response.status, StatusCode::Ok);
+        assert_eq!(response.body, "# New Page\n");
     }
 }

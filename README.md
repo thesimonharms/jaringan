@@ -50,11 +50,12 @@ cargo run -p jaringan-browser -- fetch docs/examples jrg://local/
 cargo run -p jaringan-browser -- fetch docs/examples 'jrg://local/protocol.jrg?view=ai#top'
 cargo run -p jaringan-browser -- serve docs/examples --bind 127.0.0.1:7070
 cargo run -p jaringan-browser -- get jrg://127.0.0.1:7070/
+cargo run -p jaringan-browser -- get --follow jrg://127.0.0.1:7070/
 cargo run -p jaringan-browser -- open jrg://127.0.0.1:7070/
 cargo run -p jaringan-browser -- open docs/examples/hello.jrg
 ```
 
-Use `sample` for plain-text output, `fetch` for local protocol-path resolution, `serve`/`get` for TCP transport, and `open` for the interactive ratatui browser over local files or TCP `jrg://` pages.
+Use `sample` for plain-text output, `fetch` for local protocol-path resolution, `serve`/`get` for TCP transport, `get --follow` for non-interactive redirect following, and `open` for the interactive ratatui browser over local files or TCP `jrg://` pages.
 
 Specs:
 

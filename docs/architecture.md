@@ -71,6 +71,7 @@ Application shell:
 - TCP protocol serve/get commands
 - modal ratatui event loop for local files and TCP `jrg://` URLs
 - browser-side redirect following and network error pages
+- bounded TCP client timeouts and `get --follow`
 - selection/scroll interaction state
 
 ## Specs
@@ -83,6 +84,6 @@ Application shell:
 1. **M0 scaffold:** workspace, docs, core parser, plain renderer, browser sample command.
 2. **M1 file browser:** open local `.jrg` pages, navigate links between local files, maintain history.
 3. **M2 protocol contract:** define `jrg://` URL/path semantics, page metadata, status codes, response tags, and resolver abstraction.
-4. **M3 protocol server/client:** serve, fetch, browse `jrg://` pages over TCP, follow redirect tags in the browser, and display network error pages, then harden toward TLS/discovery.
+4. **M3 protocol server/client:** serve, fetch, browse `jrg://` pages over TCP, follow redirect tags in the browser/CLI, display network error pages, and use bounded client timeouts, then harden toward TLS/discovery.
 5. **M4 actions/forms:** structured inputs and side-effectful actions with explicit confirmation.
 6. **M5 crawler/search:** index page titles, headings, links, and metadata.
