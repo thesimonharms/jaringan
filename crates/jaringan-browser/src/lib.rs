@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
 
+use jaringan_protocol::JaringanUrl;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PageLocation {
     File(PathBuf),
+    Network(JaringanUrl),
     Unsupported(String),
 }
 
@@ -37,11 +40,28 @@ impl BrowserState {
     }
 }
 
-pub fn resolve_target(current_file: &Path, target: &str) -> PageLocation {
+pub fn resolve_target(current: &PageLocation, target: &str) -> PageLocation {
+    if target.starts_with("jrg://") {
+        return JaringanUrl::parse(target)
+            .map(PageLocation::Network)
+            .unwrap_or_else(|_| PageLocation::Unsupported(target.to_owned()));
+    }
+
     if looks_like_url(target) {
         return PageLocation::Unsupported(target.to_owned());
     }
 
+    match current {
+        PageLocation::File(current_file) => resolve_file_target(current_file, target),
+        PageLocation::Network(base) => base
+            .resolve(target)
+            .map(PageLocation::Network)
+            .unwrap_or_else(|_| PageLocation::Unsupported(target.to_owned())),
+        PageLocation::Unsupported(_) => PageLocation::Unsupported(target.to_owned()),
+    }
+}
+
+fn resolve_file_target(current_file: &Path, target: &str) -> PageLocation {
     let path = PathBuf::from(target);
     if path.is_absolute() {
         return PageLocation::File(path);
@@ -138,21 +158,29 @@ mod tests {
 
     #[test]
     fn resolves_relative_jrg_links_against_current_file() {
-        let current = Path::new("/tmp/site/index.jrg");
+        let current = PageLocation::File(PathBuf::from("/tmp/site/index.jrg"));
 
         assert_eq!(
-            resolve_target(current, "about/team.jrg"),
+            resolve_target(&current, "about/team.jrg"),
             PageLocation::File(PathBuf::from("/tmp/site/about/team.jrg"))
         );
     }
 
     #[test]
-    fn treats_jrg_protocol_links_as_unsupported_until_network_transport_exists() {
-        let current = Path::new("/tmp/site/index.jrg");
+    fn resolves_jrg_protocol_links_as_network_locations() {
+        let current =
+            PageLocation::Network(JaringanUrl::parse("jrg://example.org/docs/start.jrg").unwrap());
 
         assert_eq!(
-            resolve_target(current, "jrg://example.org/home"),
-            PageLocation::Unsupported("jrg://example.org/home".into())
+            resolve_target(&current, "guide/intro.jrg?mode=ai#install"),
+            PageLocation::Network(
+                JaringanUrl::parse("jrg://example.org/docs/guide/intro.jrg?mode=ai#install")
+                    .unwrap()
+            )
+        );
+        assert_eq!(
+            resolve_target(&current, "jrg://other.example/home.jrg"),
+            PageLocation::Network(JaringanUrl::parse("jrg://other.example/home.jrg").unwrap())
         );
     }
 

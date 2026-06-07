@@ -19,7 +19,8 @@ use jaringan_browser::{
 };
 use jaringan_core::{Block, Document, Image, parse_document};
 use jaringan_protocol::{
-    JaringanUrl, LocalFileResolver, PageResolver, Request, Response, ResponseTag, fetch_tcp, serve,
+    ContentType, JaringanUrl, LocalFileResolver, PageResolver, Request, Response, ResponseTag,
+    StatusCode, fetch_tcp, serve,
 };
 use jaringan_render::render_plain;
 use ratatui::{
@@ -53,13 +54,13 @@ enum Command {
         #[arg(long, default_value = "127.0.0.1:7070")]
         bind: String,
     },
-    /// Open a local Jaringan page in the interactive terminal browser.
-    Open { path: PathBuf },
+    /// Open a local path or jrg:// URL in the interactive terminal browser.
+    Open { target: String },
 }
 
 #[derive(Debug, Clone)]
 struct LoadedPage {
-    path: PathBuf,
+    location: PageLocation,
     document: Document,
     items: Vec<InteractiveItem>,
 }
@@ -99,7 +100,7 @@ fn main() -> anyhow::Result<()> {
             eprintln!("serving {} at jrg://{bind}/", root.display());
             serve(listener, LocalFileResolver::new(root))?;
         }
-        Command::Open { path } => run_tui(path)?,
+        Command::Open { target } => run_tui(target)?,
     }
 
     Ok(())
@@ -121,14 +122,14 @@ fn print_response(response: Response) {
     print!("{}", response.body);
 }
 
-fn run_tui(path: PathBuf) -> anyhow::Result<()> {
+fn run_tui(target: String) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, path);
+    let result = run_app(&mut terminal, target);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -139,11 +140,11 @@ fn run_tui(path: PathBuf) -> anyhow::Result<()> {
 
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    start_path: PathBuf,
+    target: String,
 ) -> anyhow::Result<()> {
-    let first = canonicalish(&start_path);
-    let mut state = BrowserState::new(PageLocation::File(first.clone()));
-    let mut page = load_page(&first)?;
+    let first = parse_start_location(&target)?;
+    let mut state = BrowserState::new(first.clone());
+    let mut page = load_location(&first)?;
     let started = Instant::now();
 
     loop {
@@ -173,13 +174,15 @@ fn run_app(
                     KeyCode::Char('b') | KeyCode::Backspace => {
                         if go_back(&mut state) {
                             match &state.current {
-                                PageLocation::File(path) => page = load_page(path)?,
+                                location @ (PageLocation::File(_) | PageLocation::Network(_)) => {
+                                    page = load_location(location)?;
+                                }
                                 PageLocation::Unsupported(_) => {}
                             }
                         }
                     }
                     KeyCode::Char('r') => {
-                        page = load_page(&page.path)?;
+                        page = load_location(&page.location)?;
                         state.status = String::from("Reloaded");
                     }
                     _ => {}
@@ -200,11 +203,11 @@ fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage) -> anyhow:
     };
 
     match item {
-        InteractiveItem::Link { label, target } => match resolve_target(&page.path, &target) {
-            PageLocation::File(path) => {
-                state.status = format!("⠋ Loading {}", path.display());
-                let loaded = load_page(&path)?;
-                navigate_to(state, PageLocation::File(loaded.path.clone()));
+        InteractiveItem::Link { label, target } => match resolve_target(&page.location, &target) {
+            location @ (PageLocation::File(_) | PageLocation::Network(_)) => {
+                state.status = format!("⠋ Loading {}", location_label(&location));
+                let loaded = load_location(&location)?;
+                navigate_to(state, loaded.location.clone());
                 state.status = format!("Opened {label}");
                 *page = loaded;
             }
@@ -216,17 +219,21 @@ fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage) -> anyhow:
             state.status = format!("Button pressed: {label} → {target}");
         }
         InteractiveItem::Image(image) => {
-            state.status = image_status(&page.path, &image);
+            state.status = image_status(&page.location, &image);
         }
     }
 
     Ok(())
 }
 
-fn image_status(page_path: &Path, image: &Image) -> String {
+fn image_status(page_location: &PageLocation, image: &Image) -> String {
     if image.source.starts_with("http://") || image.source.starts_with("https://") {
         return download_remote_image(&image.source);
     }
+
+    let PageLocation::File(page_path) = page_location else {
+        return format!("Network image reference: {}", image.source);
+    };
 
     let path = page_path
         .parent()
@@ -269,7 +276,15 @@ fn download_remote_image(url: &str) -> String {
     }
 }
 
-fn load_page(path: &Path) -> anyhow::Result<LoadedPage> {
+fn load_location(location: &PageLocation) -> anyhow::Result<LoadedPage> {
+    match location {
+        PageLocation::File(path) => load_file_page(path),
+        PageLocation::Network(url) => load_network_page(url),
+        PageLocation::Unsupported(target) => bail!("unsupported target: {target}"),
+    }
+}
+
+fn load_file_page(path: &Path) -> anyhow::Result<LoadedPage> {
     if path.extension().and_then(|ext| ext.to_str()) != Some("jrg") {
         bail!(
             "Jaringan pages must use the .jrg extension: {}",
@@ -285,10 +300,58 @@ fn load_page(path: &Path) -> anyhow::Result<LoadedPage> {
     let items = collect_items(&document);
 
     Ok(LoadedPage {
-        path,
+        location: PageLocation::File(path),
         document,
         items,
     })
+}
+
+fn load_network_page(url: &JaringanUrl) -> anyhow::Result<LoadedPage> {
+    let response = fetch_tcp(url).with_context(|| format!("failed to fetch {url}"))?;
+    let document = document_from_response(&response)
+        .with_context(|| format!("failed to parse response from {url}"))?;
+    let items = collect_items(&document);
+
+    Ok(LoadedPage {
+        location: PageLocation::Network(url.clone()),
+        document,
+        items,
+    })
+}
+
+fn document_from_response(response: &Response) -> anyhow::Result<Document> {
+    if response.content_type == ContentType::JaringanPage {
+        return parse_document(&response.body).context("failed to parse Jaringan page body");
+    }
+
+    let status = response.status;
+    let text = if status == StatusCode::Ok {
+        response.body.clone()
+    } else {
+        format!(
+            "JRG/0.1 {} {}\n\n{}",
+            status.as_u16(),
+            status.reason_phrase(),
+            response.body
+        )
+    };
+
+    Ok(Document::new(vec![Block::Preformatted(text)]))
+}
+
+fn parse_start_location(target: &str) -> anyhow::Result<PageLocation> {
+    if target.starts_with("jrg://") {
+        return Ok(PageLocation::Network(JaringanUrl::parse(target)?));
+    }
+    Ok(PageLocation::File(canonicalish(Path::new(target))))
+}
+
+fn location_label(location: &PageLocation) -> String {
+    match location {
+        PageLocation::File(path) => path.display().to_string(),
+        PageLocation::Network(url) => url.to_string(),
+        PageLocation::Unsupported(target) => target.clone(),
+    }
 }
 
 fn collect_items(document: &Document) -> Vec<InteractiveItem> {
@@ -364,7 +427,7 @@ fn draw(
             "tab toggle • s scroll • v selection • j/k move • enter open/press/view • b back • r reload • q quit",
             Style::default().fg(Color::DarkGray),
         ),
-        Span::raw(format!("  {}", page.path.display())),
+        Span::raw(format!("  {}", location_label(&page.location))),
     ]))
     .block(
         TuiBlock::default()
