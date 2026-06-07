@@ -15,33 +15,43 @@ The current web is optimized for graphical browsers. AI browser-use workflows ha
 
 1. **Sharing protocol (`jaringan-protocol`)**
    - Scheme: `jrg://host/path` for network locations.
-   - For the first prototype, support local files and plain response parsing before implementing sockets/TLS.
-   - Response format is line-oriented UTF-8, easy to stream and inspect.
+   - Query strings and fragments are supported.
+   - `/foo.jrg` is a document, `/foo/` is a folder index, and `/foo` deliberately does not resolve.
+   - For the first prototype, support a local resolver before implementing sockets/TLS.
 
 2. **Rendering protocol (`jaringan-core` + `jaringan-render`)**
-   - Pages are structured blocks: headings, paragraphs, links, preformatted blocks, and actions.
+   - Pages are structured blocks: headings, paragraphs, links, buttons, images, preformatted blocks, and trailing metadata after `~~~~~`.
    - Blocks render to plain text with stable markers.
    - Ratatui render model can later map the same blocks to widgets.
 
 3. **Browser (`jaringan-browser`)**
    - CLI/TUI entrypoint.
-   - Prototype command prints a parsed document from a file or URL-like input.
-   - Later: navigation stack, keybindings, forms/actions, history, bookmarks.
+   - `sample` prints a parsed local document.
+   - `fetch` exercises the protocol resolver against a local document root.
+   - `open` launches the modal ratatui browser.
+   - Later: network transport, forms/actions, history persistence, bookmarks.
 
 ## Repository layout
 
 - `crates/jaringan-core`: shared document model and plain-text parser/serializer.
-- `crates/jaringan-protocol`: request/response types and `jrg://` URL parsing.
+- `crates/jaringan-protocol`: request/response types, `jrg://` URL parsing, status codes, response tags, and local resolver.
 - `crates/jaringan-render`: plain-text rendering and future ratatui rendering adapters.
 - `crates/jaringan-browser`: CLI/TUI application.
-- `docs/`: architecture notes and implementation plans.
+- `docs/`: architecture notes, specs, and implementation plans.
 
 ## Quick start
 
 ```bash
 cargo test
 cargo run -p jaringan-browser -- sample docs/examples/hello.jrg
+cargo run -p jaringan-browser -- fetch docs/examples jrg://local/
+cargo run -p jaringan-browser -- fetch docs/examples 'jrg://local/protocol.jrg?view=ai#top'
 cargo run -p jaringan-browser -- open docs/examples/hello.jrg
 ```
 
-Use `sample` for plain-text output and `open` for the interactive ratatui browser.
+Use `sample` for plain-text output, `fetch` for protocol-path resolution, and `open` for the interactive ratatui browser.
+
+Specs:
+
+- `docs/spec/jrg-page-format.md`
+- `docs/spec/jrg-protocol.md`

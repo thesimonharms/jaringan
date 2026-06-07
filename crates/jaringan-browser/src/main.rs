@@ -17,6 +17,7 @@ use jaringan_browser::{
     resolve_target, scroll_down, scroll_up, selection_down, selection_up, switch_mode, toggle_mode,
 };
 use jaringan_core::{Block, Document, Image, parse_document};
+use jaringan_protocol::{JaringanUrl, LocalFileResolver, PageResolver, Request};
 use jaringan_render::render_plain;
 use ratatui::{
     Terminal,
@@ -39,6 +40,8 @@ struct Cli {
 enum Command {
     /// Parse and render a local Jaringan page file.
     Sample { path: PathBuf },
+    /// Fetch a jrg:// URL from a local document root using protocol path rules.
+    Fetch { root: PathBuf, url: String },
     /// Open a local Jaringan page in the interactive terminal browser.
     Open { path: PathBuf },
 }
@@ -67,6 +70,26 @@ fn main() -> anyhow::Result<()> {
             let document = parse_document(&source)
                 .with_context(|| format!("failed to parse {}", path.display()))?;
             println!("{}", render_plain(&document));
+        }
+        Command::Fetch { root, url } => {
+            let url = JaringanUrl::parse(&url)?;
+            let resolver = LocalFileResolver::new(root);
+            let response = resolver.fetch(&Request::new(url))?;
+            println!(
+                "JRG/0.1 {} {}",
+                response.status.as_u16(),
+                response.status.reason_phrase()
+            );
+            println!("Content-Type: {}", response.content_type.as_str());
+            for tag in response.tags {
+                match tag {
+                    jaringan_protocol::ResponseTag::Redirect { target } => {
+                        println!("Tag-Redirect: {target}");
+                    }
+                }
+            }
+            println!();
+            print!("{}", response.body);
         }
         Command::Open { path } => run_tui(path)?,
     }
@@ -125,8 +148,9 @@ fn run_app(
                     KeyCode::Enter => activate_selected(&mut state, &mut page)?,
                     KeyCode::Char('b') | KeyCode::Backspace => {
                         if go_back(&mut state) {
-                            if let PageLocation::File(path) = &state.current {
-                                page = load_page(path)?;
+                            match &state.current {
+                                PageLocation::File(path) => page = load_page(path)?,
+                                PageLocation::Unsupported(_) => {}
                             }
                         }
                     }
@@ -355,7 +379,7 @@ fn render_lines(page: &LoadedPage, selected: usize) -> Vec<Line<'static>> {
                 lines.push(selectable_line(
                     selected == item_index,
                     format!("↳ {}", link.label),
-                    format!("{}", link.target),
+                    link.target.to_string(),
                     Color::Green,
                 ));
                 item_index += 1;

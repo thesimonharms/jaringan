@@ -27,7 +27,7 @@ Preformatted content keeps spacing.
 ! action-id label="Do thing" method="POST" target="/actions/do-thing"
 ```
 
-Current parser support is intentionally smaller: headings, paragraphs, links (`=> target label`), and preformatted blocks.
+Current parser support includes headings, paragraphs, links (`=> target label`), buttons, images, preformatted blocks, and trailing metadata after `~~~~~`.
 
 ## Crate responsibilities
 
@@ -38,6 +38,8 @@ Owns the stable data model:
 - `Document`
 - `Block`
 - `Link`
+- `Button`
+- `Image`
 - parser/serializer for the text-first page format
 
 ### `jaringan-protocol`
@@ -48,6 +50,8 @@ Owns transport-facing types:
 - `Request`
 - `Response`
 - status codes and content type declarations
+- `ResponseTag` redirect tags
+- `PageResolver` and `LocalFileResolver`
 
 ### `jaringan-render`
 
@@ -62,13 +66,20 @@ Application shell:
 
 - CLI arguments
 - sample rendering command
-- future ratatui event loop
+- local protocol fetch command
+- modal ratatui event loop
+- selection/scroll interaction state
+
+## Specs
+
+- `docs/spec/jrg-page-format.md`: `.jrg` block grammar, metadata delimiter, plain-text fallback rules.
+- `docs/spec/jrg-protocol.md`: `jrg://` URL semantics, strict `.jrg` path rules, status codes, response tags, local resolver behavior.
 
 ## Milestones
 
 1. **M0 scaffold:** workspace, docs, core parser, plain renderer, browser sample command.
 2. **M1 file browser:** open local `.jrg` pages, navigate links between local files, maintain history.
-3. **M2 protocol server/client:** serve and fetch `jrg://` pages over a simple TCP/TLS protocol.
-4. **M3 terminal browser:** ratatui UI with viewport, selectable links, status bar, back/forward.
+3. **M2 protocol contract:** define `jrg://` URL/path semantics, page metadata, status codes, response tags, and resolver abstraction.
+4. **M3 protocol server/client:** serve and fetch `jrg://` pages over a simple TCP/TLS protocol.
 5. **M4 actions/forms:** structured inputs and side-effectful actions with explicit confirmation.
 6. **M5 crawler/search:** index page titles, headings, links, and metadata.

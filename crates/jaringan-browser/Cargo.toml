@@ -11,5 +11,6 @@ anyhow.workspace = true
 clap.workspace = true
 crossterm = "0.28"
 jaringan-core.workspace = true
+jaringan-protocol.workspace = true
 jaringan-render.workspace = true
 ratatui.workspace = true

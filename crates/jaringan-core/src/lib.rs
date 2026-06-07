@@ -5,17 +5,38 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Document {
     pub blocks: Vec<Block>,
+    pub metadata: Option<String>,
 }
 
 impl Document {
     pub fn new(blocks: Vec<Block>) -> Self {
-        Self { blocks }
+        Self {
+            blocks,
+            metadata: None,
+        }
+    }
+
+    pub fn with_metadata(blocks: Vec<Block>, metadata: Option<String>) -> Self {
+        Self { blocks, metadata }
     }
 
     pub fn title(&self) -> Option<&str> {
-        self.blocks.iter().find_map(|block| match block {
-            Block::Heading { level: 1, text } => Some(text.as_str()),
-            _ => None,
+        self.metadata_title().or_else(|| {
+            self.blocks.iter().find_map(|block| match block {
+                Block::Heading { level: 1, text } => Some(text.as_str()),
+                _ => None,
+            })
+        })
+    }
+
+    pub fn metadata_title(&self) -> Option<&str> {
+        let metadata = self.metadata.as_ref()?;
+        metadata.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.trim()
+                .eq_ignore_ascii_case("title")
+                .then_some(value.trim())
+                .filter(|value| !value.is_empty())
         })
     }
 }
@@ -64,6 +85,7 @@ struct Parser<'a> {
     lines: Vec<&'a str>,
     cursor: usize,
     blocks: Vec<Block>,
+    metadata: Option<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -72,12 +94,18 @@ impl<'a> Parser<'a> {
             lines: input.lines().collect(),
             cursor: 0,
             blocks: Vec::new(),
+            metadata: None,
         }
     }
 
     fn parse(&mut self) -> Result<Document, ParseError> {
         while let Some(line) = self.peek() {
             let trimmed = line.trim();
+
+            if trimmed == "~~~~~" {
+                self.parse_metadata();
+                break;
+            }
 
             if trimmed.is_empty() {
                 self.cursor += 1;
@@ -103,7 +131,10 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(Document::new(std::mem::take(&mut self.blocks)))
+        Ok(Document::with_metadata(
+            std::mem::take(&mut self.blocks),
+            self.metadata.take(),
+        ))
     }
 
     fn peek(&self) -> Option<&'a str> {
@@ -128,6 +159,14 @@ impl<'a> Parser<'a> {
         Err(ParseError::UnterminatedPreformatted { line: start_line })
     }
 
+    fn parse_metadata(&mut self) {
+        self.cursor += 1;
+        let metadata = self.lines[self.cursor..].join("\n");
+        let metadata = metadata.trim().to_owned();
+        self.metadata = (!metadata.is_empty()).then_some(metadata);
+        self.cursor = self.lines.len();
+    }
+
     fn parse_paragraph(&mut self) {
         let mut lines = Vec::new();
 
@@ -139,6 +178,7 @@ impl<'a> Parser<'a> {
                 || parse_link(trimmed).is_some()
                 || parse_button(trimmed).is_some()
                 || parse_image(trimmed).is_some()
+                || trimmed == "~~~~~"
             {
                 break;
             }
@@ -303,6 +343,30 @@ mod tests {
                     source: "./cover.png".into(),
                     alt: "Cover art".into()
                 })
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_trailing_metadata_after_delimiter() {
+        let doc = parse_document(
+            "# Visible heading\n\nThis stays in the document.\n\n~~~~~\ntitle: Simon's page\ndate: 2026-06-07\nredirect: jrg://example.org/new.jrg\n",
+        )
+        .unwrap();
+
+        assert_eq!(doc.title(), Some("Simon's page"));
+        assert_eq!(
+            doc.metadata.as_deref(),
+            Some("title: Simon's page\ndate: 2026-06-07\nredirect: jrg://example.org/new.jrg")
+        );
+        assert_eq!(
+            doc.blocks,
+            vec![
+                Block::Heading {
+                    level: 1,
+                    text: "Visible heading".into()
+                },
+                Block::Paragraph("This stays in the document.".into())
             ]
         );
     }
