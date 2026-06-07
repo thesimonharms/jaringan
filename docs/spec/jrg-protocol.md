@@ -1,6 +1,6 @@
 # Jaringan Protocol 0.1
 
-Jaringan's protocol exists to fetch terminal-native `.jrg` pages for both humans and AI agents. Version 0.1 defines URL semantics, status concepts, response tags, and local resolver behavior before committing to a network transport.
+Jaringan's protocol exists to fetch terminal-native `.jrg` pages for both humans and AI agents. Version 0.1 defines URL semantics, status concepts, response tags, local resolver behavior, and a tiny TCP wire transport.
 
 ## URL scheme
 
@@ -54,6 +54,42 @@ Resolve to:
 jrg://example.org/docs/guide/intro.jrg?mode=ai#install
 jrg://example.org/about.jrg
 jrg://example.org/docs/start.jrg?old=1#section-two
+```
+
+## TCP wire transport
+
+The first transport is intentionally tiny and line-oriented. It is for local experimentation, not final security or discovery.
+
+Client request:
+
+```text
+GET jrg://127.0.0.1:7070/protocol.jrg?view=ai#top JRG/0.1
+Host: 127.0.0.1:7070
+
+```
+
+The request target may be either a full `jrg://` URL or an absolute path when a `Host:` header is present.
+
+Server response:
+
+```text
+JRG/0.1 200 OK
+Content-Type: text/jrg; charset=utf-8
+
+# Page body
+```
+
+Redirect tags are represented as headers:
+
+```text
+Tag-Redirect: jrg://example.org/new.jrg
+```
+
+Prototype commands:
+
+```bash
+cargo run -p jaringan-browser -- serve docs/examples --bind 127.0.0.1:7070
+cargo run -p jaringan-browser -- get jrg://127.0.0.1:7070/
 ```
 
 ## Request
@@ -128,8 +164,8 @@ Query strings and fragments are accepted by the URL parser but ignored by the lo
 
 ## Not in 0.1
 
-- No wire protocol yet.
 - No search/discovery.
 - No identity or signatures.
 - No automatic redirect following.
 - No content negotiation beyond basic content type enums.
+- No TLS yet.

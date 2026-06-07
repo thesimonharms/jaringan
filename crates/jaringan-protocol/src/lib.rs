@@ -1,5 +1,7 @@
 use std::{
-    fmt, fs, io,
+    fmt, fs,
+    io::{self, BufRead, BufReader, Read, Write},
+    net::{TcpListener, TcpStream},
     path::{Component, PathBuf},
 };
 
@@ -39,6 +41,30 @@ impl JaringanUrl {
 
     pub fn fragment(&self) -> Option<&str> {
         self.0.fragment()
+    }
+
+    pub fn port_or_default(&self) -> u16 {
+        self.0.port().unwrap_or(7070)
+    }
+
+    pub fn authority(&self) -> String {
+        match self.0.port() {
+            Some(port) => format!("{}:{port}", self.host()),
+            None => self.host().to_owned(),
+        }
+    }
+
+    pub fn request_target(&self) -> String {
+        let mut target = self.path().to_owned();
+        if let Some(query) = self.query() {
+            target.push('?');
+            target.push_str(query);
+        }
+        if let Some(fragment) = self.fragment() {
+            target.push('#');
+            target.push_str(fragment);
+        }
+        target
     }
 
     pub fn resolve(&self, target: &str) -> Result<Self, UrlError> {
@@ -137,6 +163,28 @@ pub enum StatusCode {
 }
 
 impl StatusCode {
+    pub fn from_u16(code: u16) -> Option<Self> {
+        match code {
+            200 => Some(Self::Ok),
+            301 => Some(Self::MovedPermanently),
+            302 => Some(Self::Found),
+            303 => Some(Self::SeeOther),
+            304 => Some(Self::NotModified),
+            400 => Some(Self::BadRequest),
+            403 => Some(Self::Forbidden),
+            404 => Some(Self::NotFound),
+            409 => Some(Self::Conflict),
+            410 => Some(Self::Gone),
+            422 => Some(Self::UnprocessableContent),
+            429 => Some(Self::TooManyRequests),
+            500 => Some(Self::ServerError),
+            501 => Some(Self::NotImplemented),
+            502 => Some(Self::BadGateway),
+            503 => Some(Self::ServiceUnavailable),
+            _ => None,
+        }
+    }
+
     pub fn as_u16(self) -> u16 {
         match self {
             Self::Ok => 200,
@@ -187,6 +235,15 @@ pub enum ContentType {
 }
 
 impl ContentType {
+    pub fn from_header(input: &str) -> Option<Self> {
+        let media_type = input.split(';').next()?.trim();
+        match media_type {
+            "text/jrg" | "text/jaringan" => Some(Self::JaringanPage),
+            "text/plain" => Some(Self::PlainText),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::JaringanPage => "text/jrg; charset=utf-8",
@@ -261,6 +318,140 @@ impl PageResolver for LocalFileResolver {
 pub enum ResolveError {
     #[error("failed to read {}: {source}", path.display())]
     Read { path: PathBuf, source: io::Error },
+}
+
+pub fn serve(listener: TcpListener, resolver: impl PageResolver) -> Result<(), WireError> {
+    for stream in listener.incoming() {
+        serve_stream(stream?, &resolver)?;
+    }
+    Ok(())
+}
+
+pub fn serve_one(listener: TcpListener, resolver: impl PageResolver) -> Result<(), WireError> {
+    let (stream, _) = listener.accept()?;
+    serve_stream(stream, &resolver)
+}
+
+pub fn serve_stream(mut stream: TcpStream, resolver: &impl PageResolver) -> Result<(), WireError> {
+    let request = read_wire_request(&mut stream)?;
+    let response = resolver.fetch(&request)?;
+    write_response(&mut stream, &response)?;
+    Ok(())
+}
+
+pub fn fetch_tcp(url: &JaringanUrl) -> Result<Response, WireError> {
+    let mut stream = TcpStream::connect((url.host(), url.port_or_default()))?;
+    writeln!(stream, "GET {} JRG/0.1", url.as_str())?;
+    writeln!(stream, "Host: {}", url.authority())?;
+    writeln!(stream)?;
+    stream.flush()?;
+    read_response(&mut stream)
+}
+
+fn read_wire_request(stream: &mut TcpStream) -> Result<Request, WireError> {
+    let mut reader = BufReader::new(stream);
+    let mut first_line = String::new();
+    reader.read_line(&mut first_line)?;
+    let mut parts = first_line.split_whitespace();
+    let method = parts.next().ok_or(WireError::BadRequest)?;
+    let target = parts.next().ok_or(WireError::BadRequest)?;
+    if method != "GET" {
+        return Err(WireError::BadRequest);
+    }
+
+    let mut host = String::new();
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some(value) = trimmed.strip_prefix("Host:") {
+            host = value.trim().to_owned();
+        }
+    }
+
+    let url = if target.starts_with("jrg://") {
+        JaringanUrl::parse(target)?
+    } else if target.starts_with('/') && !host.is_empty() {
+        JaringanUrl::parse(&format!("jrg://{host}{target}"))?
+    } else {
+        return Err(WireError::BadRequest);
+    };
+
+    Ok(Request::new(url))
+}
+
+pub fn write_response(writer: &mut impl Write, response: &Response) -> io::Result<()> {
+    writeln!(
+        writer,
+        "JRG/0.1 {} {}",
+        response.status.as_u16(),
+        response.status.reason_phrase()
+    )?;
+    writeln!(writer, "Content-Type: {}", response.content_type.as_str())?;
+    for tag in &response.tags {
+        match tag {
+            ResponseTag::Redirect { target } => writeln!(writer, "Tag-Redirect: {target}")?,
+        }
+    }
+    writeln!(writer)?;
+    write!(writer, "{}", response.body)?;
+    writer.flush()
+}
+
+pub fn read_response(reader: &mut impl Read) -> Result<Response, WireError> {
+    let mut input = String::new();
+    reader.read_to_string(&mut input)?;
+    let (headers, body) = input.split_once("\n\n").ok_or(WireError::BadResponse)?;
+    let mut lines = headers.lines();
+    let status_line = lines.next().ok_or(WireError::BadResponse)?;
+    let mut status_parts = status_line.split_whitespace();
+    if status_parts.next() != Some("JRG/0.1") {
+        return Err(WireError::BadResponse);
+    }
+    let code = status_parts
+        .next()
+        .ok_or(WireError::BadResponse)?
+        .parse::<u16>()
+        .map_err(|_| WireError::BadResponse)?;
+    let status = StatusCode::from_u16(code).ok_or(WireError::BadResponse)?;
+
+    let mut content_type = None;
+    let mut tags = Vec::new();
+    for line in lines {
+        if let Some(value) = line.strip_prefix("Content-Type:") {
+            content_type = ContentType::from_header(value.trim());
+        } else if let Some(value) = line.strip_prefix("Tag-Redirect:") {
+            tags.push(ResponseTag::Redirect {
+                target: value.trim().to_owned(),
+            });
+        }
+    }
+
+    Ok(Response {
+        status,
+        content_type: content_type.ok_or(WireError::BadResponse)?,
+        tags,
+        body: body.to_owned(),
+    })
+}
+
+#[derive(Debug, Error)]
+pub enum WireError {
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+    #[error("URL error: {0}")]
+    Url(#[from] UrlError),
+    #[error("resolver error: {0}")]
+    Resolve(#[from] ResolveError),
+    #[error("bad Jaringan wire request")]
+    BadRequest,
+    #[error("bad Jaringan wire response")]
+    BadResponse,
 }
 
 #[cfg(test)]
@@ -362,5 +553,23 @@ mod tests {
                 .body,
             "# Document\n"
         );
+    }
+
+    #[test]
+    fn tcp_client_fetches_page_from_single_request_server() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("index.jrg"), "# TCP Home\n").unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let resolver = LocalFileResolver::new(root.path());
+        let server = std::thread::spawn(move || serve_one(listener, resolver).unwrap());
+
+        let response = fetch_tcp(&JaringanUrl::parse(&format!("jrg://{addr}/")).unwrap()).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(response.status, StatusCode::Ok);
+        assert_eq!(response.content_type, ContentType::JaringanPage);
+        assert_eq!(response.body, "# TCP Home\n");
     }
 }

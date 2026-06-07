@@ -52,6 +52,7 @@ Owns transport-facing types:
 - status codes and content type declarations
 - `ResponseTag` redirect tags
 - `PageResolver` and `LocalFileResolver`
+- TCP `serve`/`fetch_tcp` transport helpers
 
 ### `jaringan-render`
 
@@ -67,19 +68,20 @@ Application shell:
 - CLI arguments
 - sample rendering command
 - local protocol fetch command
+- TCP protocol serve/get commands
 - modal ratatui event loop
 - selection/scroll interaction state
 
 ## Specs
 
 - `docs/spec/jrg-page-format.md`: `.jrg` block grammar, metadata delimiter, plain-text fallback rules.
-- `docs/spec/jrg-protocol.md`: `jrg://` URL semantics, strict `.jrg` path rules, status codes, response tags, local resolver behavior.
+- `docs/spec/jrg-protocol.md`: `jrg://` URL semantics, strict `.jrg` path rules, status codes, response tags, local resolver behavior, TCP wire format.
 
 ## Milestones
 
 1. **M0 scaffold:** workspace, docs, core parser, plain renderer, browser sample command.
 2. **M1 file browser:** open local `.jrg` pages, navigate links between local files, maintain history.
 3. **M2 protocol contract:** define `jrg://` URL/path semantics, page metadata, status codes, response tags, and resolver abstraction.
-4. **M3 protocol server/client:** serve and fetch `jrg://` pages over a simple TCP/TLS protocol.
+4. **M3 protocol server/client:** serve and fetch `jrg://` pages over TCP, then harden toward TLS/discovery.
 5. **M4 actions/forms:** structured inputs and side-effectful actions with explicit confirmation.
 6. **M5 crawler/search:** index page titles, headings, links, and metadata.

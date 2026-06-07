@@ -17,7 +17,7 @@ The current web is optimized for graphical browsers. AI browser-use workflows ha
    - Scheme: `jrg://host/path` for network locations.
    - Query strings and fragments are supported.
    - `/foo.jrg` is a document, `/foo/` is a folder index, and `/foo` deliberately does not resolve.
-   - For the first prototype, support a local resolver before implementing sockets/TLS.
+   - The first TCP transport is a tiny text protocol for local experimentation before TLS/discovery.
 
 2. **Rendering protocol (`jaringan-core` + `jaringan-render`)**
    - Pages are structured blocks: headings, paragraphs, links, buttons, images, preformatted blocks, and trailing metadata after `~~~~~`.
@@ -28,6 +28,8 @@ The current web is optimized for graphical browsers. AI browser-use workflows ha
    - CLI/TUI entrypoint.
    - `sample` prints a parsed local document.
    - `fetch` exercises the protocol resolver against a local document root.
+   - `serve` exposes a local document root over TCP.
+   - `get` fetches `jrg://host:port/path` over TCP.
    - `open` launches the modal ratatui browser.
    - Later: network transport, forms/actions, history persistence, bookmarks.
 
@@ -46,10 +48,12 @@ cargo test
 cargo run -p jaringan-browser -- sample docs/examples/hello.jrg
 cargo run -p jaringan-browser -- fetch docs/examples jrg://local/
 cargo run -p jaringan-browser -- fetch docs/examples 'jrg://local/protocol.jrg?view=ai#top'
+cargo run -p jaringan-browser -- serve docs/examples --bind 127.0.0.1:7070
+cargo run -p jaringan-browser -- get jrg://127.0.0.1:7070/
 cargo run -p jaringan-browser -- open docs/examples/hello.jrg
 ```
 
-Use `sample` for plain-text output, `fetch` for protocol-path resolution, and `open` for the interactive ratatui browser.
+Use `sample` for plain-text output, `fetch` for local protocol-path resolution, `serve`/`get` for TCP transport, and `open` for the interactive ratatui browser.
 
 Specs:
 

@@ -1,6 +1,7 @@
 use std::{
     fs,
     io::{self, Stdout},
+    net::TcpListener,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -17,7 +18,9 @@ use jaringan_browser::{
     resolve_target, scroll_down, scroll_up, selection_down, selection_up, switch_mode, toggle_mode,
 };
 use jaringan_core::{Block, Document, Image, parse_document};
-use jaringan_protocol::{JaringanUrl, LocalFileResolver, PageResolver, Request};
+use jaringan_protocol::{
+    JaringanUrl, LocalFileResolver, PageResolver, Request, Response, ResponseTag, fetch_tcp, serve,
+};
 use jaringan_render::render_plain;
 use ratatui::{
     Terminal,
@@ -42,6 +45,14 @@ enum Command {
     Sample { path: PathBuf },
     /// Fetch a jrg:// URL from a local document root using protocol path rules.
     Fetch { root: PathBuf, url: String },
+    /// Fetch a jrg:// URL over the TCP wire protocol.
+    Get { url: String },
+    /// Serve a local document root over the TCP wire protocol.
+    Serve {
+        root: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:7070")]
+        bind: String,
+    },
     /// Open a local Jaringan page in the interactive terminal browser.
     Open { path: PathBuf },
 }
@@ -75,26 +86,39 @@ fn main() -> anyhow::Result<()> {
             let url = JaringanUrl::parse(&url)?;
             let resolver = LocalFileResolver::new(root);
             let response = resolver.fetch(&Request::new(url))?;
-            println!(
-                "JRG/0.1 {} {}",
-                response.status.as_u16(),
-                response.status.reason_phrase()
-            );
-            println!("Content-Type: {}", response.content_type.as_str());
-            for tag in response.tags {
-                match tag {
-                    jaringan_protocol::ResponseTag::Redirect { target } => {
-                        println!("Tag-Redirect: {target}");
-                    }
-                }
-            }
-            println!();
-            print!("{}", response.body);
+            print_response(response);
+        }
+        Command::Get { url } => {
+            let url = JaringanUrl::parse(&url)?;
+            let response = fetch_tcp(&url)?;
+            print_response(response);
+        }
+        Command::Serve { root, bind } => {
+            let listener = TcpListener::bind(&bind)
+                .with_context(|| format!("failed to bind Jaringan server to {bind}"))?;
+            eprintln!("serving {} at jrg://{bind}/", root.display());
+            serve(listener, LocalFileResolver::new(root))?;
         }
         Command::Open { path } => run_tui(path)?,
     }
 
     Ok(())
+}
+
+fn print_response(response: Response) {
+    println!(
+        "JRG/0.1 {} {}",
+        response.status.as_u16(),
+        response.status.reason_phrase()
+    );
+    println!("Content-Type: {}", response.content_type.as_str());
+    for tag in response.tags {
+        match tag {
+            ResponseTag::Redirect { target } => println!("Tag-Redirect: {target}"),
+        }
+    }
+    println!();
+    print!("{}", response.body);
 }
 
 fn run_tui(path: PathBuf) -> anyhow::Result<()> {
