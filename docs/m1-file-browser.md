@@ -16,8 +16,12 @@ M1 turns Jaringan from a renderer demo into a local, navigable terminal browser.
 - Back navigation returns to the previous page.
 - Unsupported targets show a status message rather than crashing.
 - Buttons render as selectable actions and show status text when activated.
-- Images render as terminal-native placeholders. Local images are detected; remote image URLs can be downloaded into a cache in a later M1.x iteration.
+- Images render as terminal-native placeholders. Local images are detected; remote HTTP/HTTPS image URLs are downloaded into `~/.cache/jaringan/images/` when activated.
 - Loading feedback is displayed during page transitions; the initial implementation may be brief because local files load quickly.
+- Browser interaction is modal with exactly two movement modes:
+  - **Selection mode**: `j`/`k` or arrows move between selectable links, buttons, and images.
+  - **Scroll mode**: `j`/`k` or arrows scroll the document viewport.
+  - `tab` toggles modes, `s` enters scroll mode, and `v` enters selection mode.
 
 ## Draft page syntax additions
 

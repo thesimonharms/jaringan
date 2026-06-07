@@ -6,10 +6,18 @@ pub enum PageLocation {
     Unsupported(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserMode {
+    Selection,
+    Scroll,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserState {
     pub current: PageLocation,
+    pub mode: BrowserMode,
     pub selected: usize,
+    pub scroll_offset: u16,
     pub back_stack: Vec<PageLocation>,
     pub forward_stack: Vec<PageLocation>,
     pub status: String,
@@ -19,7 +27,9 @@ impl BrowserState {
     pub fn new(current: PageLocation) -> Self {
         Self {
             current,
+            mode: BrowserMode::Selection,
             selected: 0,
+            scroll_offset: 0,
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
             status: String::from("Ready"),
@@ -47,6 +57,7 @@ pub fn navigate_to(state: &mut BrowserState, next: PageLocation) {
     state.forward_stack.clear();
     state.current = next;
     state.selected = 0;
+    state.scroll_offset = 0;
     state.status = String::from("Loaded");
 }
 
@@ -60,8 +71,61 @@ pub fn go_back(state: &mut BrowserState) -> bool {
     state.forward_stack.push(current);
     state.current = previous;
     state.selected = 0;
+    state.scroll_offset = 0;
     state.status = String::from("Back");
     true
+}
+
+pub fn switch_mode(state: &mut BrowserState, mode: BrowserMode) {
+    state.mode = mode;
+    state.status = match mode {
+        BrowserMode::Selection => String::from("Selection mode"),
+        BrowserMode::Scroll => String::from("Scroll mode"),
+    };
+}
+
+pub fn toggle_mode(state: &mut BrowserState) {
+    let next = match state.mode {
+        BrowserMode::Selection => BrowserMode::Scroll,
+        BrowserMode::Scroll => BrowserMode::Selection,
+    };
+    switch_mode(state, next);
+}
+
+pub fn selection_down(state: &mut BrowserState, item_count: usize) {
+    if item_count > 0 {
+        state.selected = (state.selected + 1).min(item_count - 1);
+    }
+}
+
+pub fn selection_up(state: &mut BrowserState) {
+    state.selected = state.selected.saturating_sub(1);
+}
+
+pub fn scroll_down(state: &mut BrowserState, line_count: usize, viewport_height: u16) {
+    let max_offset = line_count.saturating_sub(viewport_height as usize) as u16;
+    state.scroll_offset = (state.scroll_offset + 1).min(max_offset);
+}
+
+pub fn scroll_up(state: &mut BrowserState) {
+    state.scroll_offset = state.scroll_offset.saturating_sub(1);
+}
+
+pub fn cache_filename_for_url(url: &str) -> String {
+    let mut output = String::new();
+    let mut last_was_separator = false;
+
+    for ch in url.chars() {
+        if ch.is_ascii_alphanumeric() {
+            output.push(ch.to_ascii_lowercase());
+            last_was_separator = false;
+        } else if !last_was_separator {
+            output.push('_');
+            last_was_separator = true;
+        }
+    }
+
+    output.trim_matches('_').to_owned()
 }
 
 fn looks_like_url(target: &str) -> bool {
@@ -104,5 +168,50 @@ mod tests {
         assert_eq!(state.back_stack, vec![home.clone()]);
         assert!(go_back(&mut state));
         assert_eq!(state.current, home);
+    }
+
+    #[test]
+    fn creates_safe_cache_names_for_remote_images() {
+        assert_eq!(
+            cache_filename_for_url("https://example.com/assets/cover image.png?size=large"),
+            "https_example_com_assets_cover_image_png_size_large"
+        );
+    }
+
+    #[test]
+    fn starts_in_selection_mode_and_toggles_to_scroll_mode() {
+        let mut state = BrowserState::new(PageLocation::File(PathBuf::from("/tmp/site/index.jrg")));
+
+        assert_eq!(state.mode, BrowserMode::Selection);
+        toggle_mode(&mut state);
+        assert_eq!(state.mode, BrowserMode::Scroll);
+        toggle_mode(&mut state);
+        assert_eq!(state.mode, BrowserMode::Selection);
+    }
+
+    #[test]
+    fn selection_mode_movement_changes_selected_item_only() {
+        let mut state = BrowserState::new(PageLocation::File(PathBuf::from("/tmp/site/index.jrg")));
+
+        selection_down(&mut state, 3);
+        selection_down(&mut state, 3);
+        selection_down(&mut state, 3);
+        assert_eq!(state.selected, 2);
+        assert_eq!(state.scroll_offset, 0);
+        selection_up(&mut state);
+        assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn scroll_mode_movement_changes_scroll_offset_only() {
+        let mut state = BrowserState::new(PageLocation::File(PathBuf::from("/tmp/site/index.jrg")));
+        switch_mode(&mut state, BrowserMode::Scroll);
+
+        scroll_down(&mut state, 20, 5);
+        scroll_down(&mut state, 20, 5);
+        assert_eq!(state.scroll_offset, 2);
+        assert_eq!(state.selected, 0);
+        scroll_up(&mut state);
+        assert_eq!(state.scroll_offset, 1);
     }
 }

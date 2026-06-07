@@ -12,7 +12,10 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use jaringan_browser::{BrowserState, PageLocation, go_back, navigate_to, resolve_target};
+use jaringan_browser::{
+    BrowserMode, BrowserState, PageLocation, cache_filename_for_url, go_back, navigate_to,
+    resolve_target, scroll_down, scroll_up, selection_down, selection_up, switch_mode, toggle_mode,
+};
 use jaringan_core::{Block, Document, Image, parse_document};
 use jaringan_render::render_plain;
 use ratatui::{
@@ -104,14 +107,21 @@ fn run_app(
             match event::read()? {
                 Event::Key(key) => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if !page.items.is_empty() {
-                            state.selected = (state.selected + 1).min(page.items.len() - 1);
+                    KeyCode::Tab => toggle_mode(&mut state),
+                    KeyCode::Char('s') => switch_mode(&mut state, BrowserMode::Scroll),
+                    KeyCode::Char('v') => switch_mode(&mut state, BrowserMode::Selection),
+                    KeyCode::Down | KeyCode::Char('j') => match state.mode {
+                        BrowserMode::Selection => selection_down(&mut state, page.items.len()),
+                        BrowserMode::Scroll => {
+                            let line_count = render_lines(&page, state.selected).len();
+                            let viewport_height = terminal.size()?.height.saturating_sub(6);
+                            scroll_down(&mut state, line_count, viewport_height);
                         }
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        state.selected = state.selected.saturating_sub(1);
-                    }
+                    },
+                    KeyCode::Up | KeyCode::Char('k') => match state.mode {
+                        BrowserMode::Selection => selection_up(&mut state),
+                        BrowserMode::Scroll => scroll_up(&mut state),
+                    },
                     KeyCode::Enter => activate_selected(&mut state, &mut page)?,
                     KeyCode::Char('b') | KeyCode::Backspace => {
                         if go_back(&mut state) {
@@ -166,11 +176,8 @@ fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage) -> anyhow:
 }
 
 fn image_status(page_path: &Path, image: &Image) -> String {
-    if image.source.contains("://") {
-        return format!(
-            "Remote image declared: {} — downloader coming next",
-            image.source
-        );
+    if image.source.starts_with("http://") || image.source.starts_with("https://") {
+        return download_remote_image(&image.source);
     }
 
     let path = page_path
@@ -181,6 +188,36 @@ fn image_status(page_path: &Path, image: &Image) -> String {
         format!("Local image available: {}", path.display())
     } else {
         format!("Image missing: {}", path.display())
+    }
+}
+
+fn download_remote_image(url: &str) -> String {
+    let cache_dir = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".cache/jaringan/images");
+
+    if let Err(error) = fs::create_dir_all(&cache_dir) {
+        return format!("Could not create image cache: {error}");
+    }
+
+    let output_path = cache_dir.join(cache_filename_for_url(url));
+    let status = std::process::Command::new("curl")
+        .args([
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--output",
+        ])
+        .arg(&output_path)
+        .arg(url)
+        .status();
+
+    match status {
+        Ok(status) if status.success() => format!("Downloaded image: {}", output_path.display()),
+        Ok(status) => format!("Image download failed with status: {status}"),
+        Err(error) => format!("Image download requires curl: {error}"),
     }
 }
 
@@ -261,16 +298,22 @@ fn draw(
                 .borders(Borders::LEFT | Borders::RIGHT)
                 .border_style(Style::default().fg(Color::DarkGray)),
         )
+        .scroll((state.scroll_offset, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(body, chunks[1]);
 
     let spinner = spinner(elapsed);
+    let mode_label = match state.mode {
+        BrowserMode::Selection => "SELECTION",
+        BrowserMode::Scroll => "SCROLL",
+    };
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(format!(" {spinner} "), Style::default().fg(Color::Magenta)),
+        Span::styled(format!("{mode_label} "), Style::default().fg(Color::Cyan).bold()),
         Span::styled(&state.status, Style::default().fg(Color::Yellow)),
         Span::raw("  "),
         Span::styled(
-            "↑/k ↓/j select • enter open/press/view • b back • r reload • q quit",
+            "tab toggle • s scroll • v selection • j/k move • enter open/press/view • b back • r reload • q quit",
             Style::default().fg(Color::DarkGray),
         ),
         Span::raw(format!("  {}", page.path.display())),
