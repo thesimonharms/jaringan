@@ -149,7 +149,7 @@ Redirects are represented as tags instead of magic browser behavior:
 ResponseTag::Redirect { target }
 ```
 
-Browsers can later use this for redirect safety UI such as “this page wants to redirect to X; follow?”
+The prototype terminal browser follows redirect tags automatically for `jrg://` pages, resolving relative redirect targets against the current page URL and stopping after a small redirect limit. The lower-level `get` command prints the response and does not follow redirects.
 
 ## Local resolver
 
@@ -166,6 +166,6 @@ Query strings and fragments are accepted by the URL parser but ignored by the lo
 
 - No search/discovery.
 - No identity or signatures.
-- No automatic redirect following.
+- No redirect safety UI yet; the prototype browser follows redirects automatically.
 - No content negotiation beyond basic content type enums.
 - No TLS yet.

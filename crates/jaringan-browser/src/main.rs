@@ -307,16 +307,74 @@ fn load_file_page(path: &Path) -> anyhow::Result<LoadedPage> {
 }
 
 fn load_network_page(url: &JaringanUrl) -> anyhow::Result<LoadedPage> {
-    let response = fetch_tcp(url).with_context(|| format!("failed to fetch {url}"))?;
-    let document = document_from_response(&response)
-        .with_context(|| format!("failed to parse response from {url}"))?;
-    let items = collect_items(&document);
+    const MAX_REDIRECTS: usize = 5;
 
-    Ok(LoadedPage {
-        location: PageLocation::Network(url.clone()),
-        document,
-        items,
+    let mut current = url.clone();
+    for redirect_count in 0..=MAX_REDIRECTS {
+        let response = match fetch_tcp(&current) {
+            Ok(response) => response,
+            Err(error) => {
+                return Ok(network_error_page(
+                    current,
+                    format!("failed to fetch {url}: {error}"),
+                ));
+            }
+        };
+
+        if let Some(target) = redirect_target(&response) {
+            if redirect_count == MAX_REDIRECTS {
+                return Ok(network_error_page(
+                    current,
+                    format!("too many redirects while fetching {url}"),
+                ));
+            }
+
+            current = match current.resolve(target) {
+                Ok(next) => next,
+                Err(error) => {
+                    return Ok(network_error_page(
+                        current,
+                        format!("bad redirect target `{target}` while fetching {url}: {error}"),
+                    ));
+                }
+            };
+            continue;
+        }
+
+        let document = document_from_response(&response)
+            .with_context(|| format!("failed to parse response from {current}"))?;
+        let items = collect_items(&document);
+
+        return Ok(LoadedPage {
+            location: PageLocation::Network(current),
+            document,
+            items,
+        });
+    }
+
+    unreachable!("redirect loop exits by returning once MAX_REDIRECTS is reached")
+}
+
+fn redirect_target(response: &Response) -> Option<&str> {
+    response.tags.first().map(|tag| match tag {
+        ResponseTag::Redirect { target } => target.as_str(),
     })
+}
+
+fn network_error_page(location: JaringanUrl, message: String) -> LoadedPage {
+    let document = Document::new(vec![
+        Block::Heading {
+            level: 1,
+            text: "Network error".to_owned(),
+        },
+        Block::Preformatted(message),
+    ]);
+
+    LoadedPage {
+        location: PageLocation::Network(location),
+        document,
+        items: Vec::new(),
+    }
 }
 
 fn document_from_response(response: &Response) -> anyhow::Result<Document> {
@@ -547,4 +605,62 @@ fn spinner(elapsed: Duration) -> &'static str {
 
 fn canonicalish(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone)]
+    struct RedirectResolver;
+
+    impl PageResolver for RedirectResolver {
+        fn fetch(&self, request: &Request) -> Result<Response, jaringan_protocol::ResolveError> {
+            match request.url.path() {
+                "/old.jrg" => Ok(Response::page(StatusCode::Found, "redirecting").with_tag(
+                    ResponseTag::Redirect {
+                        target: "new.jrg".to_owned(),
+                    },
+                )),
+                "/new.jrg" => Ok(Response::page(StatusCode::Ok, "# New Page\n")),
+                path => Ok(Response::text(
+                    StatusCode::NotFound,
+                    format!("missing {path}"),
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn network_loader_follows_redirect_tags_to_final_page() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let resolver = RedirectResolver;
+            jaringan_protocol::serve_one(listener.try_clone().unwrap(), resolver.clone()).unwrap();
+            jaringan_protocol::serve_one(listener, resolver).unwrap();
+        });
+
+        let loaded =
+            load_network_page(&JaringanUrl::parse(&format!("jrg://{addr}/old.jrg")).unwrap())
+                .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(
+            loaded.location,
+            PageLocation::Network(JaringanUrl::parse(&format!("jrg://{addr}/new.jrg")).unwrap())
+        );
+        assert_eq!(loaded.document.title(), Some("New Page"));
+    }
+
+    #[test]
+    fn network_loader_returns_error_page_when_fetch_fails() {
+        let loaded =
+            load_network_page(&JaringanUrl::parse("jrg://127.0.0.1:1/missing.jrg").unwrap())
+                .unwrap();
+        let lines = render_plain(&loaded.document);
+
+        assert!(lines.contains("Network error"));
+        assert!(lines.contains("jrg://127.0.0.1:1/missing.jrg"));
+    }
 }
