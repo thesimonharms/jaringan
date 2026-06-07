@@ -46,6 +46,7 @@ pub enum Block {
     Heading { level: u8, text: String },
     Paragraph(String),
     Link(Link),
+    Input(Input),
     Button(Button),
     Image(Image),
     Preformatted(String),
@@ -58,10 +59,43 @@ pub struct Link {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Input {
+    pub name: String,
+    pub label: String,
+    pub value: String,
+    pub placeholder: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionMethod {
+    Get,
+    Post,
+}
+
+impl ActionMethod {
+    fn parse(input: &str) -> Option<Self> {
+        match input.to_ascii_uppercase().as_str() {
+            "GET" => Some(Self::Get),
+            "POST" => Some(Self::Post),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Button {
     pub id: String,
     pub label: String,
     pub target: String,
+    pub method: ActionMethod,
+    pub confirm: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +154,9 @@ impl<'a> Parser<'a> {
             } else if let Some(link) = parse_link(trimmed) {
                 self.blocks.push(Block::Link(link));
                 self.cursor += 1;
+            } else if let Some(input) = parse_input(trimmed) {
+                self.blocks.push(Block::Input(input));
+                self.cursor += 1;
             } else if let Some(button) = parse_button(trimmed) {
                 self.blocks.push(Block::Button(button));
                 self.cursor += 1;
@@ -176,6 +213,7 @@ impl<'a> Parser<'a> {
                 || trimmed.starts_with("```")
                 || parse_heading(trimmed).is_some()
                 || parse_link(trimmed).is_some()
+                || parse_input(trimmed).is_some()
                 || parse_button(trimmed).is_some()
                 || parse_image(trimmed).is_some()
                 || trimmed == "~~~~~"
@@ -231,11 +269,38 @@ fn parse_button(line: &str) -> Option<Button> {
     let attrs = parts.next().unwrap_or_default();
     let label = parse_quoted_attr(attrs, "label").unwrap_or_else(|| id.to_owned());
     let target = parse_quoted_attr(attrs, "target").unwrap_or_else(|| id.to_owned());
+    let method = parse_quoted_attr(attrs, "method")
+        .as_deref()
+        .and_then(ActionMethod::parse)
+        .unwrap_or(ActionMethod::Get);
+    let confirm = parse_quoted_attr(attrs, "confirm");
 
     Some(Button {
         id: id.to_owned(),
         label,
         target,
+        method,
+        confirm,
+    })
+}
+
+fn parse_input(line: &str) -> Option<Input> {
+    let remainder = line.strip_prefix('?')?.trim();
+    let mut parts = remainder.splitn(2, char::is_whitespace);
+    let name = parts.next()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let attrs = parts.next().unwrap_or_default();
+    let label = parse_quoted_attr(attrs, "label").unwrap_or_else(|| name.to_owned());
+    let value = parse_quoted_attr(attrs, "value").unwrap_or_default();
+    let placeholder = parse_quoted_attr(attrs, "placeholder");
+
+    Some(Input {
+        name: name.to_owned(),
+        label,
+        value,
+        placeholder,
     })
 }
 
@@ -337,11 +402,44 @@ mod tests {
                 Block::Button(Button {
                     id: "save".into(),
                     label: "Save this page".into(),
-                    target: "save".into()
+                    target: "save".into(),
+                    method: ActionMethod::Get,
+                    confirm: None
                 }),
                 Block::Image(Image {
                     source: "./cover.png".into(),
                     alt: "Cover art".into()
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_structured_inputs_and_action_buttons() {
+        let doc = parse_document(
+            "# Search\n\n? q label=\"Query\" value=\"laksa\" placeholder=\"Restaurant name\"\n! submit label=\"Search\" method=\"POST\" target=\"/actions/search\" confirm=\"Submit search?\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            doc.blocks,
+            vec![
+                Block::Heading {
+                    level: 1,
+                    text: "Search".into()
+                },
+                Block::Input(Input {
+                    name: "q".into(),
+                    label: "Query".into(),
+                    value: "laksa".into(),
+                    placeholder: Some("Restaurant name".into())
+                }),
+                Block::Button(Button {
+                    id: "submit".into(),
+                    label: "Search".into(),
+                    target: "/actions/search".into(),
+                    method: ActionMethod::Post,
+                    confirm: Some("Submit search?".into())
                 })
             ]
         );

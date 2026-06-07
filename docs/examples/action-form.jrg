@@ -1,0 +1,10 @@
+# Action Form Example
+
+This page exercises the M4 structured input and explicit confirmation syntax.
+
+? q label="Search query" value="laksa" placeholder="Restaurant or dish"
+! search label="Search" method="POST" target="/actions/search" confirm="Submit search?"
+
+~~~~~
+title: M4 action form example
+date: 2026-06-07

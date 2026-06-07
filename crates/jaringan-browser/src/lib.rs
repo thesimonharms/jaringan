@@ -16,6 +16,12 @@ pub enum BrowserMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionConfirmation {
+    pub id: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserState {
     pub current: PageLocation,
     pub mode: BrowserMode,
@@ -24,6 +30,7 @@ pub struct BrowserState {
     pub back_stack: Vec<PageLocation>,
     pub forward_stack: Vec<PageLocation>,
     pub status: String,
+    pub pending_confirmation: Option<ActionConfirmation>,
 }
 
 impl BrowserState {
@@ -36,6 +43,7 @@ impl BrowserState {
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
             status: String::from("Ready"),
+            pending_confirmation: None,
         }
     }
 }

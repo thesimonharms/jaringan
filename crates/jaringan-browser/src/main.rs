@@ -14,10 +14,11 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use jaringan_browser::{
-    BrowserMode, BrowserState, PageLocation, cache_filename_for_url, go_back, navigate_to,
-    resolve_target, scroll_down, scroll_up, selection_down, selection_up, switch_mode, toggle_mode,
+    ActionConfirmation, BrowserMode, BrowserState, PageLocation, cache_filename_for_url, go_back,
+    navigate_to, resolve_target, scroll_down, scroll_up, selection_down, selection_up, switch_mode,
+    toggle_mode,
 };
-use jaringan_core::{Block, Document, Image, parse_document};
+use jaringan_core::{ActionMethod, Block, Document, Image, Input, parse_document};
 use jaringan_protocol::{
     ContentType, JaringanUrl, LocalFileResolver, PageResolver, Request, Response, ResponseTag,
     StatusCode, fetch_tcp, serve,
@@ -72,8 +73,18 @@ struct LoadedPage {
 
 #[derive(Debug, Clone)]
 enum InteractiveItem {
-    Link { label: String, target: String },
-    Button { label: String, target: String },
+    Link {
+        label: String,
+        target: String,
+    },
+    Input(Input),
+    Button {
+        id: String,
+        label: String,
+        target: String,
+        method: ActionMethod,
+        confirm: Option<String>,
+    },
     Image(Image),
 }
 
@@ -246,15 +257,64 @@ fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage) -> anyhow:
                 state.status = format!("Unsupported target for now: {target}");
             }
         },
-        InteractiveItem::Button { label, target } => {
-            state.status = format!("Button pressed: {label} → {target}");
+        InteractiveItem::Button {
+            id,
+            label,
+            target,
+            method,
+            confirm,
+        } => activate_button(state, id, label, target, method, confirm),
+        InteractiveItem::Input(input) => {
+            state.pending_confirmation = None;
+            state.status = input_status(&input);
         }
         InteractiveItem::Image(image) => {
+            state.pending_confirmation = None;
             state.status = image_status(&page.location, &image);
         }
     }
 
     Ok(())
+}
+
+fn activate_button(
+    state: &mut BrowserState,
+    id: String,
+    label: String,
+    target: String,
+    method: ActionMethod,
+    confirm: Option<String>,
+) {
+    if let Some(prompt) = confirm {
+        let already_confirmed = state
+            .pending_confirmation
+            .as_ref()
+            .is_some_and(|action| action.id == id && action.target == target);
+        if !already_confirmed {
+            state.pending_confirmation = Some(ActionConfirmation { id, target });
+            state.status = format!("{prompt} Press Enter again to confirm.");
+            return;
+        }
+    }
+
+    state.pending_confirmation = None;
+    state.status = match method {
+        ActionMethod::Get => format!("Confirmed GET action: {target}"),
+        ActionMethod::Post => format!("Confirmed POST action: {target}"),
+    };
+
+    if label.is_empty() {
+        state.status.push_str(" (unnamed action)");
+    }
+}
+
+fn input_status(input: &Input) -> String {
+    let value = if input.value.is_empty() {
+        input.placeholder.as_deref().unwrap_or("")
+    } else {
+        &input.value
+    };
+    format!("Input {} = {}", input.name, value)
 }
 
 fn image_status(page_location: &PageLocation, image: &Image) -> String {
@@ -452,9 +512,13 @@ fn collect_items(document: &Document) -> Vec<InteractiveItem> {
                 label: link.label.clone(),
                 target: link.target.clone(),
             }),
+            Block::Input(input) => Some(InteractiveItem::Input(input.clone())),
             Block::Button(button) => Some(InteractiveItem::Button {
+                id: button.id.clone(),
                 label: button.label.clone(),
                 target: button.target.clone(),
+                method: button.method,
+                confirm: button.confirm.clone(),
             }),
             Block::Image(image) => Some(InteractiveItem::Image(image.clone())),
             _ => None,
@@ -560,11 +624,20 @@ fn render_lines(page: &LoadedPage, selected: usize) -> Vec<Line<'static>> {
                 ));
                 item_index += 1;
             }
+            Block::Input(input) => {
+                lines.push(selectable_line(
+                    selected == item_index,
+                    format!("▣ {}", input.label),
+                    input.value.clone(),
+                    Color::LightBlue,
+                ));
+                item_index += 1;
+            }
             Block::Button(button) => {
                 lines.push(selectable_line(
                     selected == item_index,
                     format!("◉ {}", button.label),
-                    button.target.clone(),
+                    format!("{} {}", button.method.as_str(), button.target),
                     Color::Magenta,
                 ));
                 item_index += 1;
@@ -714,5 +787,34 @@ mod tests {
         assert_eq!(final_url.as_str(), format!("jrg://{addr}/new.jrg"));
         assert_eq!(response.status, StatusCode::Ok);
         assert_eq!(response.body, "# New Page\n");
+    }
+
+    #[test]
+    fn confirmed_post_button_requires_second_enter_before_action_runs() {
+        let document = parse_document(
+            "# Tools\n\n? q label=\"Query\" value=\"laksa\"\n! search label=\"Search\" method=\"POST\" target=\"/actions/search\" confirm=\"Submit search?\"\n",
+        )
+        .unwrap();
+        let mut page = LoadedPage {
+            location: PageLocation::File(PathBuf::from("/tmp/tools.jrg")),
+            items: collect_items(&document),
+            document,
+        };
+        let mut state = BrowserState::new(page.location.clone());
+        state.selected = 1;
+
+        activate_selected(&mut state, &mut page).unwrap();
+        assert_eq!(state.status, "Submit search? Press Enter again to confirm.");
+        assert_eq!(
+            state
+                .pending_confirmation
+                .as_ref()
+                .map(|action| action.id.as_str()),
+            Some("search")
+        );
+
+        activate_selected(&mut state, &mut page).unwrap();
+        assert_eq!(state.status, "Confirmed POST action: /actions/search");
+        assert!(state.pending_confirmation.is_none());
     }
 }

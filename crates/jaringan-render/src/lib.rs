@@ -45,8 +45,24 @@ pub fn render_plain_with_options(document: &Document, options: RenderOptions) ->
                 }
                 link_index += 1;
             }
+            Block::Input(input) => {
+                let value = if input.value.is_empty() {
+                    input.placeholder.as_deref().unwrap_or("")
+                } else {
+                    &input.value
+                };
+                output.push_str(&format!(
+                    "[input] {} ({}) = {}\n",
+                    input.label, input.name, value
+                ));
+            }
             Block::Button(button) => {
-                output.push_str(&format!("[button] {} <{}>\n", button.label, button.target));
+                output.push_str(&format!(
+                    "[button] {} <{} {}>\n",
+                    button.label,
+                    button.method.as_str(),
+                    button.target
+                ));
             }
             Block::Image(image) => {
                 output.push_str(&format!("[image] {} <{}>\n", image.alt, image.source));
@@ -87,10 +103,23 @@ pub fn render_ratatui_text(document: &Document) -> Text<'static> {
                 )));
                 link_index += 1;
             }
+            Block::Input(input) => {
+                let value = if input.value.is_empty() {
+                    input.placeholder.as_deref().unwrap_or("")
+                } else {
+                    &input.value
+                };
+                lines.push(Line::raw(format!(
+                    "[input] {} ({}) = {}",
+                    input.label, input.name, value
+                )));
+            }
             Block::Button(button) => {
                 lines.push(Line::raw(format!(
-                    "[button] {} <{}>",
-                    button.label, button.target
+                    "[button] {} <{} {}>",
+                    button.label,
+                    button.method.as_str(),
+                    button.target
                 )));
             }
             Block::Image(image) => {

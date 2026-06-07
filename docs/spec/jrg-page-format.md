@@ -54,17 +54,33 @@ Examples:
 => jrg://example.org/docs/start.jrg Remote page
 ```
 
-### Buttons
+### Inputs
 
 ```text
-! id label="Button label" target="action-or-target"
+? name label="Input label" value="current value" placeholder="Hint text"
 ```
 
-- Buttons are terminal-native controls.
+- Inputs are structured form fields.
+- `name` is required and is the machine-readable field key.
+- `label` is optional and defaults to `name`.
+- `value` is optional and defaults to an empty string.
+- `placeholder` is optional hint text for empty inputs.
+- The prototype browser renders inputs as selectable fields and shows their current value when activated. Editing is planned for a later M4 slice.
+
+### Buttons / actions
+
+```text
+! id label="Button label" method="POST" target="action-or-target" confirm="Run this action?"
+```
+
+- Buttons are terminal-native controls and may represent side-effectful actions.
 - `id` is required.
 - `label` is optional and defaults to `id`.
 - `target` is optional and defaults to `id`.
-- Button targets are intentionally opaque for now. Browsers may show or log them instead of executing anything.
+- `method` is optional and defaults to `GET`; supported values are `GET` and `POST`.
+- `confirm` is optional explicit confirmation copy.
+- When `confirm` is present, the prototype browser requires pressing Enter twice: first to stage the action and display the confirmation prompt, then again to confirm it.
+- Confirmed actions are surfaced in browser status text for now. Network POST execution and input editing are planned for later M4 slices.
 
 ### Images
 
