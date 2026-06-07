@@ -17,7 +17,7 @@ A Jaringan page is a sequence of line-oriented blocks:
 
 Paragraph text can span lines until a blank line.
 
-=> jar://example/about About page
+=> jrg://example/about About page
 => https://example.com Outside-web fallback
 
 ```plain
@@ -67,8 +67,8 @@ Application shell:
 ## Milestones
 
 1. **M0 scaffold:** workspace, docs, core parser, plain renderer, browser sample command.
-2. **M1 file browser:** open local `.jar` pages, navigate links between local files, maintain history.
-3. **M2 protocol server/client:** serve and fetch `jar://` pages over a simple TCP/TLS protocol.
+2. **M1 file browser:** open local `.jrg` pages, navigate links between local files, maintain history.
+3. **M2 protocol server/client:** serve and fetch `jrg://` pages over a simple TCP/TLS protocol.
 4. **M3 terminal browser:** ratatui UI with viewport, selectable links, status bar, back/forward.
 5. **M4 actions/forms:** structured inputs and side-effectful actions with explicit confirmation.
 6. **M5 crawler/search:** index page titles, headings, links, and metadata.

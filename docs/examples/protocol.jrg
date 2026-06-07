@@ -1,0 +1,20 @@
+# Protocol Sketch
+
+Jaringan pages are UTF-8, line-oriented, and mostly useful as plain text.
+
+Supported blocks in the current prototype:
+
+```plain
+# Heading
+
+Paragraph text.
+
+=> about.jrg Link label
+! action-id label="Button label" target="action-target"
+@ ./image.png alt="Image alt text"
+```
+
+Network transport will use `jrg://host/path` later. M1 intentionally opens local `.jrg` files first.
+
+=> hello.jrg Home
+=> about.jrg About Jaringan

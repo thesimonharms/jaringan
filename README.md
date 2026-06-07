@@ -14,7 +14,7 @@ The current web is optimized for graphical browsers. AI browser-use workflows ha
 ## First three parts
 
 1. **Sharing protocol (`jaringan-protocol`)**
-   - Scheme: `jar://host/path` for network locations.
+   - Scheme: `jrg://host/path` for network locations.
    - For the first prototype, support local files and plain response parsing before implementing sockets/TLS.
    - Response format is line-oriented UTF-8, easy to stream and inspect.
 
@@ -31,7 +31,7 @@ The current web is optimized for graphical browsers. AI browser-use workflows ha
 ## Repository layout
 
 - `crates/jaringan-core`: shared document model and plain-text parser/serializer.
-- `crates/jaringan-protocol`: request/response types and `jar://` URL parsing.
+- `crates/jaringan-protocol`: request/response types and `jrg://` URL parsing.
 - `crates/jaringan-render`: plain-text rendering and future ratatui rendering adapters.
 - `crates/jaringan-browser`: CLI/TUI application.
 - `docs/`: architecture notes and implementation plans.
@@ -40,5 +40,8 @@ The current web is optimized for graphical browsers. AI browser-use workflows ha
 
 ```bash
 cargo test
-cargo run -p jaringan-browser -- sample docs/examples/hello.jar
+cargo run -p jaringan-browser -- sample docs/examples/hello.jrg
+cargo run -p jaringan-browser -- open docs/examples/hello.jrg
 ```
+
+Use `sample` for plain-text output and `open` for the interactive ratatui browser.

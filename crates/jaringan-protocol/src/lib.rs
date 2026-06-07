@@ -9,7 +9,7 @@ pub struct JaringanUrl(Url);
 impl JaringanUrl {
     pub fn parse(input: &str) -> Result<Self, UrlError> {
         let url = Url::parse(input).map_err(UrlError::Parse)?;
-        if url.scheme() != "jar" {
+        if url.scheme() != "jrg" {
             return Err(UrlError::UnsupportedScheme(url.scheme().to_owned()));
         }
         if url.host_str().is_none() {
@@ -41,9 +41,9 @@ impl fmt::Display for JaringanUrl {
 pub enum UrlError {
     #[error("failed to parse URL: {0}")]
     Parse(url::ParseError),
-    #[error("unsupported scheme `{0}`; expected `jar`")]
+    #[error("unsupported scheme `{0}`; expected `jrg`")]
     UnsupportedScheme(String),
-    #[error("jar URL must include a host")]
+    #[error("jrg URL must include a host")]
     MissingHost,
 }
 
@@ -98,8 +98,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_jar_urls() {
-        let url = JaringanUrl::parse("jar://example.org/docs/start").unwrap();
+    fn parses_jrg_urls() {
+        let url = JaringanUrl::parse("jrg://example.org/docs/start").unwrap();
 
         assert_eq!(url.host(), "example.org");
         assert_eq!(url.path(), "/docs/start");
@@ -110,6 +110,13 @@ mod tests {
         let error = JaringanUrl::parse("https://example.org").unwrap_err();
 
         assert!(matches!(error, UrlError::UnsupportedScheme(scheme) if scheme == "https"));
+    }
+
+    #[test]
+    fn rejects_legacy_jar_scheme() {
+        let error = JaringanUrl::parse("jar://example.org/docs/start").unwrap_err();
+
+        assert!(matches!(error, UrlError::UnsupportedScheme(scheme) if scheme == "jar"));
     }
 
     #[test]

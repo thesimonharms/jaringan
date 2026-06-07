@@ -45,6 +45,12 @@ pub fn render_plain_with_options(document: &Document, options: RenderOptions) ->
                 }
                 link_index += 1;
             }
+            Block::Button(button) => {
+                output.push_str(&format!("[button] {} <{}>\n", button.label, button.target));
+            }
+            Block::Image(image) => {
+                output.push_str(&format!("[image] {} <{}>\n", image.alt, image.source));
+            }
             Block::Preformatted(text) => {
                 output.push_str("```\n");
                 output.push_str(text);
@@ -81,6 +87,18 @@ pub fn render_ratatui_text(document: &Document) -> Text<'static> {
                 )));
                 link_index += 1;
             }
+            Block::Button(button) => {
+                lines.push(Line::raw(format!(
+                    "[button] {} <{}>",
+                    button.label, button.target
+                )));
+            }
+            Block::Image(image) => {
+                lines.push(Line::raw(format!(
+                    "[image] {} <{}>",
+                    image.alt, image.source
+                )));
+            }
             Block::Preformatted(text) => {
                 lines.push(Line::raw("```"));
                 lines.extend(text.lines().map(|line| Line::raw(line.to_owned())));
@@ -101,19 +119,31 @@ mod tests {
 
     #[test]
     fn renders_plain_text_with_numbered_links() {
-        let doc = parse_document("# Hello\n\nWelcome.\n\n=> jar://example/about About\n").unwrap();
+        let doc = parse_document("# Hello\n\nWelcome.\n\n=> jrg://example/about About\n").unwrap();
         let rendered = render_plain(&doc);
 
         assert!(rendered.contains("# Hello"));
         assert!(rendered.contains("Welcome."));
-        assert!(rendered.contains("[1] About <jar://example/about>"));
+        assert!(rendered.contains("[1] About <jrg://example/about>"));
     }
 
     #[test]
     fn renders_ratatui_text() {
-        let doc = parse_document("# Hello\n\n=> jar://example/about About\n").unwrap();
+        let doc = parse_document("# Hello\n\n=> jrg://example/about About\n").unwrap();
         let text = render_ratatui_text(&doc);
 
         assert!(text.lines.len() >= 3);
+    }
+
+    #[test]
+    fn renders_buttons_and_images_as_terminal_native_controls() {
+        let doc = parse_document(
+            "# Rich\n\n! save label=\"Save\" target=\"save\"\n@ ./cover.png alt=\"Cover\"\n",
+        )
+        .unwrap();
+        let rendered = render_plain(&doc);
+
+        assert!(rendered.contains("[button] Save"));
+        assert!(rendered.contains("[image] Cover <./cover.png>"));
     }
 }

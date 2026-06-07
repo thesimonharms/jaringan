@@ -25,6 +25,8 @@ pub enum Block {
     Heading { level: u8, text: String },
     Paragraph(String),
     Link(Link),
+    Button(Button),
+    Image(Image),
     Preformatted(String),
 }
 
@@ -32,6 +34,19 @@ pub enum Block {
 pub struct Link {
     pub target: String,
     pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Button {
+    pub id: String,
+    pub label: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Image {
+    pub source: String,
+    pub alt: String,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -77,6 +92,12 @@ impl<'a> Parser<'a> {
             } else if let Some(link) = parse_link(trimmed) {
                 self.blocks.push(Block::Link(link));
                 self.cursor += 1;
+            } else if let Some(button) = parse_button(trimmed) {
+                self.blocks.push(Block::Button(button));
+                self.cursor += 1;
+            } else if let Some(image) = parse_image(trimmed) {
+                self.blocks.push(Block::Image(image));
+                self.cursor += 1;
             } else {
                 self.parse_paragraph();
             }
@@ -116,6 +137,8 @@ impl<'a> Parser<'a> {
                 || trimmed.starts_with("```")
                 || parse_heading(trimmed).is_some()
                 || parse_link(trimmed).is_some()
+                || parse_button(trimmed).is_some()
+                || parse_image(trimmed).is_some()
             {
                 break;
             }
@@ -158,6 +181,48 @@ fn parse_link(line: &str) -> Option<Link> {
     Some(Link { target, label })
 }
 
+fn parse_button(line: &str) -> Option<Button> {
+    let remainder = line.strip_prefix('!')?.trim();
+    let mut parts = remainder.splitn(2, char::is_whitespace);
+    let id = parts.next()?.trim();
+    if id.is_empty() {
+        return None;
+    }
+    let attrs = parts.next().unwrap_or_default();
+    let label = parse_quoted_attr(attrs, "label").unwrap_or_else(|| id.to_owned());
+    let target = parse_quoted_attr(attrs, "target").unwrap_or_else(|| id.to_owned());
+
+    Some(Button {
+        id: id.to_owned(),
+        label,
+        target,
+    })
+}
+
+fn parse_image(line: &str) -> Option<Image> {
+    let remainder = line.strip_prefix('@')?.trim();
+    let mut parts = remainder.splitn(2, char::is_whitespace);
+    let source = parts.next()?.trim();
+    if source.is_empty() {
+        return None;
+    }
+    let attrs = parts.next().unwrap_or_default();
+    let alt = parse_quoted_attr(attrs, "alt").unwrap_or_else(|| source.to_owned());
+
+    Some(Image {
+        source: source.to_owned(),
+        alt,
+    })
+}
+
+fn parse_quoted_attr(input: &str, key: &str) -> Option<String> {
+    let needle = format!("{key}=\"");
+    let start = input.find(&needle)? + needle.len();
+    let rest = &input[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_owned())
+}
+
 impl fmt::Display for Link {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} <{}>", self.label, self.target)
@@ -171,7 +236,7 @@ mod tests {
     #[test]
     fn parses_heading_paragraph_and_link() {
         let doc = parse_document(
-            "# Hello\n\nThis is a page\nfor terminals.\n\n=> jar://example/about About us\n",
+            "# Hello\n\nThis is a page\nfor terminals.\n\n=> jrg://example/about About us\n",
         )
         .unwrap();
 
@@ -185,7 +250,7 @@ mod tests {
                 },
                 Block::Paragraph("This is a page for terminals.".into()),
                 Block::Link(Link {
-                    target: "jar://example/about".into(),
+                    target: "jrg://example/about".into(),
                     label: "About us".into()
                 })
             ]
@@ -213,5 +278,32 @@ mod tests {
         let error = parse_document("# Broken\n\n```plain\nno end\n").unwrap_err();
 
         assert_eq!(error, ParseError::UnterminatedPreformatted { line: 3 });
+    }
+
+    #[test]
+    fn parses_buttons_and_images() {
+        let doc = parse_document(
+            "# Rich\n\n! save label=\"Save this page\" target=\"save\"\n@ ./cover.png alt=\"Cover art\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            doc.blocks,
+            vec![
+                Block::Heading {
+                    level: 1,
+                    text: "Rich".into()
+                },
+                Block::Button(Button {
+                    id: "save".into(),
+                    label: "Save this page".into(),
+                    target: "save".into()
+                }),
+                Block::Image(Image {
+                    source: "./cover.png".into(),
+                    alt: "Cover art".into()
+                })
+            ]
+        );
     }
 }

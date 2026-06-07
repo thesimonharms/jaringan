@@ -1,0 +1,14 @@
+# Welcome to Jaringan
+
+This is a terminal-native page. It stays useful as raw text, but it can also be parsed into semantic blocks for agents and rendered into an aesthetic TUI for humans.
+
+=> about.jrg About Jaringan
+=> protocol.jrg Protocol sketch
+! demo label="Press a terminal-native button" target="demo-button"
+@ ./cover.png alt="A future inline cover image"
+=> https://github.com/thesimonharms/jaringan Source repository placeholder
+
+```plain
+AI view: parse headings, paragraphs, links, buttons, and images without screenshots.
+Human view: browse with a fast keyboard-first terminal UI.
+```

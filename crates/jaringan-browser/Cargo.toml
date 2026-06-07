@@ -9,5 +9,7 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+crossterm = "0.28"
 jaringan-core.workspace = true
 jaringan-render.workspace = true
+ratatui.workspace = true

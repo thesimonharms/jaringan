@@ -72,7 +72,7 @@ Run:
 cargo test -p jaringan-protocol
 ```
 
-Expected: URL parser accepts `jar://example.org/path` and rejects non-`jar` schemes.
+Expected: URL parser accepts `jrg://example.org/path` and rejects non-`jrg` schemes.
 
 ### Task 4: Implement plain renderer
 
@@ -101,7 +101,7 @@ Expected: renderer output includes title, paragraph text, and `[1] label <target
 
 **Files:**
 - Modify: `crates/jaringan-browser/src/main.rs`
-- Create: `docs/examples/hello.jar`
+- Create: `docs/examples/hello.jrg`
 
 **Implementation:**
 
@@ -112,7 +112,7 @@ Add `jaringan-browser sample <path>` that reads a file, parses it, renders it, a
 Run:
 
 ```bash
-cargo run -p jaringan-browser -- sample docs/examples/hello.jar
+cargo run -p jaringan-browser -- sample docs/examples/hello.jrg
 ```
 
 Expected: terminal output shows a rendered title, paragraph, and numbered link.
@@ -128,7 +128,7 @@ Run:
 ```bash
 cargo fmt --all --check
 cargo test
-cargo run -p jaringan-browser -- sample docs/examples/hello.jar
+cargo run -p jaringan-browser -- sample docs/examples/hello.jrg
 ```
 
 Expected: all commands succeed.

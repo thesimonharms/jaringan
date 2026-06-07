@@ -433,8 +433,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "crossterm",
  "jaringan-core",
  "jaringan-render",
+ "ratatui",
 ]
 
 [[package]]
