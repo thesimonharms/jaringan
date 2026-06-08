@@ -982,14 +982,21 @@ fn load_web_page(url: &str, keyring: &PublicKeyring) -> anyhow::Result<LoadedPag
 }
 
 fn load_file_page_with_keyring(path: &Path, keyring: &PublicKeyring) -> anyhow::Result<LoadedPage> {
-    if path.extension().and_then(|ext| ext.to_str()) != Some("jrg") {
-        bail!(
-            "Jaringan pages must use the .jrg extension: {}",
-            path.display()
-        );
-    }
-
     let path = canonicalish(path);
+
+    if path.extension().and_then(|ext| ext.to_str()) != Some("jrg") {
+        // Non-.jrg files: load as plain text
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let document = Document::new(vec![Block::Preformatted(source)]);
+        let items = collect_items(&document);
+        return Ok(LoadedPage {
+            location: PageLocation::File(path),
+            document,
+            items,
+            signature_status: SignatureStatus::Unsigned,
+        });
+    }
     let source =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let document =
@@ -2304,6 +2311,49 @@ mod tests {
                 signer: "alice".into()
             }
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn non_jrg_files_are_loaded_as_plain_text() {
+        let root = std::env::temp_dir().join(format!(
+            "jaringan-ext-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        // .txt file loads as preformatted text
+        fs::write(root.join("readme.txt"), "Hello world\n\nThis is plain text.").unwrap();
+        let result_txt = load_file_page_with_keyring(
+            &root.join("readme.txt"),
+            &PublicKeyring::default(),
+        );
+        assert!(result_txt.is_ok(), ".txt files should load as plain text: {:?}", result_txt);
+        let page = result_txt.unwrap();
+        assert!(matches!(page.document.blocks.first(), Some(Block::Preformatted(_))));
+        assert_eq!(page.signature_status, SignatureStatus::Unsigned);
+
+        // No extension — loads as plain text too
+        fs::write(root.join("readme"), "No extension content").unwrap();
+        let result_noext = load_file_page_with_keyring(
+            &root.join("readme"),
+            &PublicKeyring::default(),
+        );
+        assert!(result_noext.is_ok(), "files without extension should load as plain text: {:?}", result_noext);
+        let page = result_noext.unwrap();
+        assert!(matches!(page.document.blocks.first(), Some(Block::Preformatted(_))));
+
+        // .jrg still parses as JRG
+        fs::write(root.join("readme.jrg"), "# Hello").unwrap();
+        let result_jrg = load_file_page_with_keyring(
+            &root.join("readme.jrg"),
+            &PublicKeyring::default(),
+        );
+        assert!(result_jrg.is_ok(), ".jrg files should load fine");
+        let page = result_jrg.unwrap();
+        assert!(matches!(page.document.blocks.first(), Some(Block::Heading { .. })));
+
         fs::remove_dir_all(root).unwrap();
     }
 }
