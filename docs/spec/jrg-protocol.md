@@ -58,7 +58,7 @@ jrg://example.org/docs/start.jrg?old=1#section-two
 
 ## TCP wire transport
 
-The first transport is intentionally tiny and line-oriented. It is for local experimentation, not final security or discovery.
+The first transport is intentionally tiny and line-oriented. `jrg://` remains the single scheme as security features evolve; signing or encryption should not create a second protocol name. Browsers surface whether a page is secure or not secure instead of refusing unsigned content by default.
 
 Client request:
 
@@ -117,7 +117,27 @@ Request {
 }
 ```
 
-Supported request methods are `GET` and `POST`. `POST` bodies use URL-encoded form payloads in the prototype. Future network transports can add agent hints, accepted render capabilities, cache validators, and authentication without changing page syntax.
+Supported request methods are `GET` and `POST`. `POST` bodies use URL-encoded form payloads in the prototype. Future network transports can add agent hints, accepted render capabilities, cache validators, encryption, and authentication without changing page syntax.
+
+## Security indicators and signatures
+
+Jaringan is secure-capable under the same `jrg://` scheme. Security is a page/browser state, not a separate URL scheme.
+
+- Unsigned pages are valid and render normally.
+- Signed pages declare `signed-by:` and `signature:` metadata after `~~~~~`.
+- The browser verifies signatures against its configured public keyring and shows `secure: signed by <name>` or `not secure: ...`.
+- Public keyrings are the signing authority. Jaringan tooling should not be a centralized security gatekeeper.
+
+Prototype metadata shape:
+
+```text
+~~~~~
+title: Signed page
+signed-by: alice
+signature: ed25519:<base64-signature>
+```
+
+The Ed25519 signature covers the full source with the `signature:` metadata line omitted. This lets signatures cover visible content and metadata such as title while allowing the signature itself to live inside page metadata.
 
 ## Response
 
@@ -186,8 +206,6 @@ The prototype local resolver also includes one demo action endpoint for M4 exper
 
 ## Not in 0.1
 
-- No search/discovery.
-- No identity or signatures.
 - No redirect safety UI yet; the prototype browser and `get --follow` follow redirects automatically.
 - No content negotiation beyond basic content type enums.
-- No TLS yet.
+- No encrypted transport yet.

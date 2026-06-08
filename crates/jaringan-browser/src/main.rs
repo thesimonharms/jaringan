@@ -19,7 +19,8 @@ use jaringan_browser::{
     toggle_mode,
 };
 use jaringan_core::{
-    ActionMethod, Block, Document, Image, Input, SearchEntry, SearchIndex, parse_document,
+    ActionMethod, Block, Document, Image, Input, PublicKeyring, SearchEntry, SearchIndex,
+    SignatureStatus, parse_document, verify_source_signature,
 };
 use jaringan_protocol::{
     ContentType, JaringanUrl, LocalFileResolver, PageResolver, Request, Response, ResponseTag,
@@ -86,6 +87,7 @@ struct LoadedPage {
     location: PageLocation,
     document: Document,
     items: Vec<InteractiveItem>,
+    signature_status: SignatureStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -428,6 +430,7 @@ fn activate_button(
                 location: state.current.clone(),
                 items: collect_items(&document),
                 document,
+                signature_status: SignatureStatus::Unsigned,
             };
         }
         (PageLocation::File(current_file), ActionMethod::Post) if target.starts_with("/") => {
@@ -441,6 +444,7 @@ fn activate_button(
                 location: page.location.clone(),
                 items: collect_items(&document),
                 document,
+                signature_status: SignatureStatus::Unsigned,
             };
         }
         (PageLocation::File(current_file), ActionMethod::Get) if target == "/search" => {
@@ -453,6 +457,7 @@ fn activate_button(
                 location: page.location.clone(),
                 items: collect_items(&document),
                 document,
+                signature_status: SignatureStatus::Unsigned,
             };
         }
         _ => {
@@ -667,11 +672,13 @@ fn load_file_page(path: &Path) -> anyhow::Result<LoadedPage> {
     let document =
         parse_document(&source).with_context(|| format!("failed to parse {}", path.display()))?;
     let items = collect_items(&document);
+    let signature_status = verify_source_signature(&source, &default_keyring());
 
     Ok(LoadedPage {
         location: PageLocation::File(path),
         document,
         items,
+        signature_status,
     })
 }
 
@@ -718,6 +725,7 @@ fn load_network_page(url: &JaringanUrl) -> anyhow::Result<LoadedPage> {
             location: PageLocation::Network(current),
             document,
             items,
+            signature_status: verify_source_signature(&response.body, &default_keyring()),
         });
     }
 
@@ -743,6 +751,7 @@ fn network_error_page(location: JaringanUrl, message: String) -> LoadedPage {
         location: PageLocation::Network(location),
         document,
         items: Vec::new(),
+        signature_status: SignatureStatus::Unsigned,
     }
 }
 
@@ -778,6 +787,31 @@ fn location_label(location: &PageLocation) -> String {
         PageLocation::File(path) => path.display().to_string(),
         PageLocation::Network(url) => url.to_string(),
         PageLocation::Unsupported(target) => target.clone(),
+    }
+}
+
+fn default_keyring() -> PublicKeyring {
+    PublicKeyring::default()
+}
+
+fn security_label(status: &SignatureStatus) -> String {
+    match status {
+        SignatureStatus::Secure { signer } => format!("secure: signed by {signer}"),
+        SignatureStatus::Unsigned => String::from("not secure: unsigned"),
+        SignatureStatus::UnknownSigner { signer } => {
+            format!("not secure: unknown signer {signer}")
+        }
+        SignatureStatus::Invalid { reason } => format!("not secure: {reason}"),
+    }
+}
+
+fn security_style(status: &SignatureStatus) -> Style {
+    match status {
+        SignatureStatus::Secure { .. } => Style::default().fg(Color::Green).bold(),
+        SignatureStatus::Unsigned => Style::default().fg(Color::DarkGray),
+        SignatureStatus::UnknownSigner { .. } | SignatureStatus::Invalid { .. } => {
+            Style::default().fg(Color::Yellow).bold()
+        }
     }
 }
 
@@ -826,6 +860,11 @@ fn draw(
     let header = Paragraph::new(Line::from(vec![
         Span::styled("✦ jaringan ", Style::default().fg(Color::Cyan).bold()),
         Span::styled(title.to_owned(), Style::default().fg(Color::White).bold()),
+        Span::raw("  "),
+        Span::styled(
+            security_label(&page.signature_status),
+            security_style(&page.signature_status),
+        ),
     ]))
     .block(
         TuiBlock::default()
@@ -1083,6 +1122,7 @@ mod tests {
             location: PageLocation::File(root.join("tools.jrg")),
             items: collect_items(&document),
             document,
+            signature_status: SignatureStatus::Unsigned,
         };
         let mut state = BrowserState::new(page.location.clone());
         state.selected = 1;
@@ -1117,6 +1157,7 @@ mod tests {
             location: PageLocation::File(PathBuf::from("/tmp/tools.jrg")),
             items: collect_items(&document),
             document,
+            signature_status: SignatureStatus::Unsigned,
         };
         let mut state = BrowserState::new(page.location.clone());
 
@@ -1201,6 +1242,7 @@ mod tests {
             location: PageLocation::File(root.join("home.jrg")),
             items: collect_items(&document),
             document,
+            signature_status: SignatureStatus::Unsigned,
         };
         let mut state = BrowserState::new(page.location.clone());
         state.selected = 1;
@@ -1213,5 +1255,19 @@ mod tests {
             matches!(page.items.first(), Some(InteractiveItem::Link { target, .. }) if target == "food.jrg")
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn security_label_marks_unsigned_and_signed_pages() {
+        assert_eq!(
+            security_label(&SignatureStatus::Unsigned),
+            "not secure: unsigned"
+        );
+        assert_eq!(
+            security_label(&SignatureStatus::Secure {
+                signer: "alice".into()
+            }),
+            "secure: signed by alice"
+        );
     }
 }

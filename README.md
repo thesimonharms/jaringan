@@ -17,7 +17,8 @@ The current web is optimized for graphical browsers. AI browser-use workflows ha
    - Scheme: `jrg://host/path` for network locations.
    - Query strings and fragments are supported.
    - `/foo.jrg` is a document, `/foo/` is a folder index, and `/foo` deliberately does not resolve.
-   - The first TCP transport is a tiny text protocol for local experimentation before TLS/discovery.
+   - `jrg://` is the single secure-capable scheme: signed pages use public keyrings and browsers show secure/not secure instead of inventing a second scheme.
+   - The first TCP transport is a tiny text protocol for local experimentation before encrypted transport/discovery.
 
 2. **Rendering protocol (`jaringan-core` + `jaringan-render`)**
    - Pages are structured blocks: headings, paragraphs, links, structured inputs, action buttons, images, preformatted blocks, and trailing metadata after `~~~~~`.
@@ -66,4 +67,5 @@ Specs:
 
 - `docs/spec/jrg-page-format.md`
 - `docs/spec/jrg-protocol.md`
+- `docs/spec/jrg-security.md`
 - `docs/spec/jrg-search.md`

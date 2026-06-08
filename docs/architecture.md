@@ -42,9 +42,11 @@ Owns the stable data model:
 - `Input`
 - `Image`
 - `SearchEntry` / `SearchIndex`
+- `PublicKeyring` / `SignatureStatus`
 - parser/serializer for the text-first page format
 - title/heading/link/metadata extraction for local search
 - tokenized local search, snippets, and prototype index text serialization
+- same-scheme page signature verification against public keyrings
 
 ### `jaringan-protocol`
 
@@ -80,11 +82,13 @@ Application shell:
 - editable form inputs and confirmed POST action submission
 - local `index`/`search` commands for M5 crawl/search experiments
 - persisted `.jrgidx` files and local GET `/search` result pages in the TUI
+- secure/not-secure indicator in the browser header
 
 ## Specs
 
 - `docs/spec/jrg-page-format.md`: `.jrg` block grammar, metadata delimiter, plain-text fallback rules.
 - `docs/spec/jrg-protocol.md`: `jrg://` URL semantics, strict `.jrg` path rules, status codes, response tags, local resolver behavior, TCP wire format.
+- `docs/spec/jrg-security.md`: same-scheme security model, public-keyring signatures, browser indicators.
 - `docs/spec/jrg-search.md`: M5 local indexing fields, ranking weights, and prototype CLI output.
 
 ## Milestones
@@ -95,3 +99,4 @@ Application shell:
 4. **M3 protocol server/client:** serve, fetch, browse `jrg://` pages over TCP, follow redirect tags in the browser/CLI, display network error pages, and use bounded client timeouts, then harden toward TLS/discovery.
 5. **M4 actions/forms:** structured/editable inputs, action buttons with explicit two-step confirmation, URL-encoded payload collection, TCP POST action submission, and a local demo action handler.
 6. **M5 crawler/search:** index page titles, headings, links, metadata, and body text; crawl local `.jrg` roots, query/persist the resulting search index, and expose local TUI search result pages.
+7. **M6 security indicators:** keep `jrg://` as one secure-capable scheme, verify optional Ed25519 page signatures against public keyrings, and display secure/not-secure state without gatekeeping unsigned pages.

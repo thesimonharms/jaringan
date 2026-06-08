@@ -1,4 +1,7 @@
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
+
+use base64::Engine;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 use thiserror::Error;
 
@@ -102,6 +105,121 @@ pub struct Button {
 pub struct Image {
     pub source: String,
     pub alt: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignatureStatus {
+    Secure { signer: String },
+    Unsigned,
+    UnknownSigner { signer: String },
+    Invalid { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PublicKeyring {
+    ed25519_keys: BTreeMap<String, VerifyingKey>,
+}
+
+impl PublicKeyring {
+    pub fn add_ed25519_key(
+        &mut self,
+        signer: impl Into<String>,
+        key_base64: &str,
+    ) -> Result<(), String> {
+        let key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(key_base64)
+            .map_err(|error| format!("bad ed25519 public key base64: {error}"))?;
+        let key_bytes: [u8; 32] = key_bytes
+            .try_into()
+            .map_err(|_| String::from("ed25519 public keys must be 32 bytes"))?;
+        let verifying_key = VerifyingKey::from_bytes(&key_bytes)
+            .map_err(|error| format!("bad ed25519 public key: {error}"))?;
+        self.ed25519_keys.insert(signer.into(), verifying_key);
+        Ok(())
+    }
+
+    fn ed25519_key(&self, signer: &str) -> Option<&VerifyingKey> {
+        self.ed25519_keys.get(signer)
+    }
+}
+
+pub fn verify_source_signature(source: &str, keyring: &PublicKeyring) -> SignatureStatus {
+    let Some(metadata) = source_metadata(source) else {
+        return SignatureStatus::Unsigned;
+    };
+    let Some(signer) = metadata_value(metadata, "signed-by") else {
+        return SignatureStatus::Unsigned;
+    };
+    let Some(signature_value) = metadata_value(metadata, "signature") else {
+        return SignatureStatus::Invalid {
+            reason: format!("signed-by `{signer}` is present without a signature"),
+        };
+    };
+    let Some(signature_base64) = signature_value.strip_prefix("ed25519:") else {
+        return SignatureStatus::Invalid {
+            reason: String::from("signature must use ed25519:<base64>"),
+        };
+    };
+    let Some(verifying_key) = keyring.ed25519_key(signer) else {
+        return SignatureStatus::UnknownSigner {
+            signer: signer.to_owned(),
+        };
+    };
+    let signature_bytes = match base64::engine::general_purpose::STANDARD.decode(signature_base64) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return SignatureStatus::Invalid {
+                reason: format!("bad signature base64: {error}"),
+            };
+        }
+    };
+    let signature_bytes: [u8; 64] = match signature_bytes.try_into() {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return SignatureStatus::Invalid {
+                reason: String::from("ed25519 signatures must be 64 bytes"),
+            };
+        }
+    };
+    let signature = Signature::from_bytes(&signature_bytes);
+    match verifying_key.verify(canonical_signature_payload(source).as_bytes(), &signature) {
+        Ok(()) => SignatureStatus::Secure {
+            signer: signer.to_owned(),
+        },
+        Err(error) => SignatureStatus::Invalid {
+            reason: format!("signature verification failed: {error}"),
+        },
+    }
+}
+
+pub fn canonical_signature_payload(source: &str) -> String {
+    let Some((body, metadata)) = source.split_once("~~~~~") else {
+        return source.to_owned();
+    };
+    let metadata_without_signature = metadata
+        .lines()
+        .filter(|line| {
+            line.split_once(':')
+                .is_none_or(|(key, _)| !key.trim().eq_ignore_ascii_case("signature"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{body}~~~~~\n{}\n", metadata_without_signature.trim())
+}
+
+fn source_metadata(source: &str) -> Option<&str> {
+    source.split_once("~~~~~").map(|(_, metadata)| metadata)
+}
+
+fn metadata_value<'a>(metadata: &'a str, key: &str) -> Option<&'a str> {
+    metadata.lines().find_map(|line| {
+        let (candidate, value) = line.split_once(':')?;
+        candidate
+            .trim()
+            .eq_ignore_ascii_case(key)
+            .then_some(value.trim())
+            .filter(|value| !value.is_empty())
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -894,5 +1012,45 @@ mod tests {
 
         assert_eq!(decoded.entries(), index.entries());
         assert_eq!(decoded.search("hawker")[0].entry.title, "Penang Laksa");
+    }
+
+    #[test]
+    fn unsigned_sources_are_not_secure_but_allowed() {
+        let source = "# Plain page\n\nUnsigned pages are still valid Jaringan pages.\n";
+        let keyring = PublicKeyring::default();
+
+        assert_eq!(
+            verify_source_signature(source, &keyring),
+            SignatureStatus::Unsigned
+        );
+    }
+
+    #[test]
+    fn signed_sources_verify_against_public_keyring() {
+        use base64::Engine;
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let unsigned = "# Signed page\n\nThis content is covered.\n\n~~~~~\ntitle: Signed page\nsigned-by: alice\n";
+        let signature = signing_key.sign(canonical_signature_payload(unsigned).as_bytes());
+        let source = format!(
+            "{unsigned}signature: ed25519:{}\n",
+            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+        );
+        let mut keyring = PublicKeyring::default();
+        keyring
+            .add_ed25519_key(
+                "alice",
+                &base64::engine::general_purpose::STANDARD.encode(verifying_key.to_bytes()),
+            )
+            .unwrap();
+
+        assert_eq!(
+            verify_source_signature(&source, &keyring),
+            SignatureStatus::Secure {
+                signer: "alice".into()
+            }
+        );
     }
 }

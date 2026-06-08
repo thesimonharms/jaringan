@@ -110,7 +110,16 @@ spacing is preserved
 
 ## Metadata
 
-Metadata lives at the bottom of the page after a delimiter line:
+Metadata starts after a line containing exactly `~~~~~` and continues to the end of the file. Metadata is not rendered as page body.
+
+Security metadata is optional and uses the same trailing block:
+
+```text
+signed-by: alice
+signature: ed25519:<base64-signature>
+```
+
+Unsigned pages are valid. Browsers use keyrings to verify signatures when present and display secure/not-secure state.
 
 ```text
 ~~~~~
