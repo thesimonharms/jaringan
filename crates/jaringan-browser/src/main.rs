@@ -20,7 +20,7 @@ use jaringan_browser::{
 };
 use jaringan_core::{
     ActionMethod, Block, Document, Image, Input, PublicKeyring, SearchEntry, SearchIndex,
-    SignatureStatus, parse_document, verify_source_signature,
+    SignatureStatus, Table, parse_document, verify_source_signature,
 };
 use jaringan_protocol::{
     ContentType, EncryptedTcpConfig, EncryptionKey, JaringanUrl, LocalFileResolver, PageResolver,
@@ -1070,6 +1070,40 @@ fn render_lines(page: &LoadedPage, selected: usize) -> Vec<Line<'static>> {
                 ));
                 item_index += 1;
             }
+            Block::Quote(text) => {
+                for line in text.lines() {
+                    lines.push(Line::from(vec![
+                        Span::styled("┃ ", Style::default().fg(Color::LightMagenta).bold()),
+                        Span::styled(
+                            line.to_owned(),
+                            Style::default().fg(Color::LightMagenta).italic(),
+                        ),
+                    ]));
+                }
+                lines.push(Line::raw(""));
+            }
+            Block::List(items) => {
+                for item in items {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ◆ ", Style::default().fg(Color::Cyan)),
+                        Span::styled(item.clone(), Style::default().fg(Color::Gray)),
+                    ]));
+                }
+                lines.push(Line::raw(""));
+            }
+            Block::Rule => {
+                lines.push(Line::from(Span::styled(
+                    "  ────────────────────────────────────────────────",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.push(Line::raw(""));
+            }
+            Block::Table(table) => {
+                for line in render_browser_table(table) {
+                    lines.push(line);
+                }
+                lines.push(Line::raw(""));
+            }
             Block::Preformatted(text) => {
                 lines.push(Line::from(Span::styled(
                     "╭─",
@@ -1091,6 +1125,61 @@ fn render_lines(page: &LoadedPage, selected: usize) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+fn render_browser_table(table: &Table) -> Vec<Line<'static>> {
+    let columns = table
+        .headers
+        .len()
+        .max(table.rows.iter().map(Vec::len).max().unwrap_or(0));
+    if columns == 0 {
+        return Vec::new();
+    }
+
+    let mut widths = vec![0usize; columns];
+    for (index, cell) in table.headers.iter().enumerate() {
+        widths[index] = widths[index].max(cell.chars().count());
+    }
+    for row in &table.rows {
+        for (index, cell) in row.iter().enumerate() {
+            widths[index] = widths[index].max(cell.chars().count());
+        }
+    }
+
+    let mut lines = Vec::new();
+    lines.push(browser_table_row(&table.headers, &widths, true));
+    lines.push(Line::from(Span::styled(
+        browser_table_separator(&widths),
+        Style::default().fg(Color::DarkGray),
+    )));
+    for row in &table.rows {
+        lines.push(browser_table_row(row, &widths, false));
+    }
+    lines
+}
+
+fn browser_table_row(row: &[String], widths: &[usize], header: bool) -> Line<'static> {
+    let mut spans = vec![Span::styled("  │", Style::default().fg(Color::DarkGray))];
+    for (index, width) in widths.iter().enumerate() {
+        let cell = row.get(index).map(String::as_str).unwrap_or("");
+        let style = if header {
+            Style::default().fg(Color::Cyan).bold()
+        } else {
+            Style::default().fg(Color::White)
+        };
+        spans.push(Span::styled(format!(" {cell:<width$} "), style));
+        spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+    }
+    Line::from(spans)
+}
+
+fn browser_table_separator(widths: &[usize]) -> String {
+    let cells = widths
+        .iter()
+        .map(|width| "─".repeat(width + 2))
+        .collect::<Vec<_>>()
+        .join("┼");
+    format!("  ├{cells}┤")
 }
 
 fn selectable_line(selected: bool, label: String, target: String, color: Color) -> Line<'static> {
@@ -1211,6 +1300,37 @@ mod tests {
         assert_eq!(final_url.as_str(), format!("jrg://{addr}/new.jrg"));
         assert_eq!(response.status, StatusCode::Ok);
         assert_eq!(response.body, "# New Page\n");
+    }
+
+    #[test]
+    fn browser_render_lines_include_polished_rich_blocks() {
+        let document = parse_document(
+            "# Layout\n\n> Calm focus.\n\n- fast\n- readable\n\n---\n\n| Element | Render |\n| --- | --- |\n| Table | Aligned |\n",
+        )
+        .unwrap();
+        let page = LoadedPage {
+            location: PageLocation::File(PathBuf::from("/tmp/layout.jrg")),
+            items: collect_items(&document),
+            document,
+            signature_status: SignatureStatus::Unsigned,
+        };
+
+        let rendered = render_lines(&page, 0)
+            .into_iter()
+            .map(|line| {
+                line.spans
+                    .into_iter()
+                    .map(|span| span.content.into_owned())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("┃ Calm focus."));
+        assert!(rendered.contains("◆ fast"));
+        assert!(rendered.contains("────────────────"));
+        assert!(rendered.contains("Element"));
+        assert!(rendered.contains("Aligned"));
     }
 
     #[test]

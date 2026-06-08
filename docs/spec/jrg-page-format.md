@@ -97,6 +97,47 @@ Examples:
 - `alt` is optional and defaults to the source.
 - Terminal browsers may render inline when supported, download/cache remote images, or expose the alt text and source as selectable items.
 
+### Quotes
+
+```text
+> Important note
+> with a second line
+```
+
+- Consecutive `>` lines become one quote block.
+- The browser renders quotes with an accent rail.
+
+### Lists
+
+```text
+- first item
+- second item
+```
+
+- Consecutive `- ` or `* ` lines become one unordered list block.
+- Lists are rendered as skimmable bullets in plain output and polished diamonds in the TUI.
+
+### Rules
+
+```text
+---
+```
+
+- A line containing `---`, `***`, or `___` becomes a horizontal divider.
+
+### Tables
+
+```text
+| Name | Role |
+| --- | --- |
+| Simon | Builder |
+```
+
+- Consecutive pipe-delimited rows become one table block.
+- The first row is the header.
+- A Markdown-style separator row is optional and ignored by the parser.
+- Plain and TUI renderers align columns based on cell width.
+
 ### Preformatted blocks
 
 ````text

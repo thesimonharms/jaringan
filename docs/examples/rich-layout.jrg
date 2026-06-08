@@ -1,0 +1,22 @@
+# Rich Layout Demo
+
+> A terminal page can feel calm, structured, and beautiful without needing a DOM.
+> Jaringan keeps the source plain while giving the browser richer render cues.
+
+## Highlights
+
+- aligned tables for compact comparisons
+- quotes for editorial emphasis
+- lists for skimmable structure
+- rules for visual rhythm
+
+---
+
+| Element | Source shape | Browser feel |
+| --- | --- | --- |
+| Table | pipe rows | aligned columns |
+| Quote | `>` lines | accent rail |
+| List | `-` lines | cyan diamonds |
+| Rule | `---` | subtle divider |
+
+=> hello.jrg Back to hello

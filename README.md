@@ -21,7 +21,7 @@ The current web is optimized for graphical browsers. AI browser-use workflows ha
    - The first TCP transport is a tiny text protocol for local experimentation, with optional encrypted framing for pre-shared-key deployments.
 
 2. **Rendering protocol (`jaringan-core` + `jaringan-render`)**
-   - Pages are structured blocks: headings, paragraphs, links, structured inputs, action buttons, images, preformatted blocks, and trailing metadata after `~~~~~`.
+   - Pages are structured blocks: headings, paragraphs, links, structured inputs, action buttons, images, quotes, lists, rules, tables, preformatted blocks, and trailing metadata after `~~~~~`.
    - Blocks render to plain text with stable markers.
    - Ratatui render model can later map the same blocks to widgets.
 
@@ -61,6 +61,7 @@ cargo run -p jaringan-browser -- search docs/examples action --index /tmp/docs.j
 cargo run -p jaringan-browser -- open jrg://127.0.0.1:7070/
 cargo run -p jaringan-browser -- open docs/examples/hello.jrg
 cargo run -p jaringan-browser -- open docs/examples/search-form.jrg
+cargo run -p jaringan-browser -- open docs/examples/rich-layout.jrg
 ```
 
 Use `sample` for plain-text output, `fetch` for local protocol-path resolution, `serve`/`get` for TCP transport, `get --follow` for non-interactive redirect following, `--encrypted-key-id` plus `JARINGAN_ENCRYPTION_KEY_HEX` for encrypted TCP framing, `index`/`search` for local M5 crawl/search experiments, and `open` for the interactive ratatui browser over local files or TCP `jrg://` pages. `index --output` persists a reusable `.jrgidx` search index, and `search --index` queries that index instead of crawling. M4/M5 form syntax uses `? name ...` inputs and `! id ...` buttons. Inputs can be edited in the browser; confirmed POST actions submit URL-encoded values, and local GET `/search` actions render selectable search results in the TUI.

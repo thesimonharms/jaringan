@@ -1,4 +1,4 @@
-use jaringan_core::{Block, Document};
+use jaringan_core::{Block, Document, Table};
 use ratatui::text::{Line, Span, Text};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +67,25 @@ pub fn render_plain_with_options(document: &Document, options: RenderOptions) ->
             Block::Image(image) => {
                 output.push_str(&format!("[image] {} <{}>\n", image.alt, image.source));
             }
+            Block::Quote(text) => {
+                for line in text.lines() {
+                    output.push_str(&format!("> {line}\n"));
+                }
+                output.push('\n');
+            }
+            Block::List(items) => {
+                for item in items {
+                    output.push_str(&format!("• {item}\n"));
+                }
+                output.push('\n');
+            }
+            Block::Rule => {
+                output.push_str("────────────────────────────────────────\n\n");
+            }
+            Block::Table(table) => {
+                output.push_str(&render_table_plain(table));
+                output.push_str("\n\n");
+            }
             Block::Preformatted(text) => {
                 output.push_str("```\n");
                 output.push_str(text);
@@ -128,6 +147,30 @@ pub fn render_ratatui_text(document: &Document) -> Text<'static> {
                     image.alt, image.source
                 )));
             }
+            Block::Quote(text) => {
+                for line in text.lines() {
+                    lines.push(Line::raw(format!("┃ {line}")));
+                }
+                lines.push(Line::raw(""));
+            }
+            Block::List(items) => {
+                for item in items {
+                    lines.push(Line::raw(format!("  • {item}")));
+                }
+                lines.push(Line::raw(""));
+            }
+            Block::Rule => {
+                lines.push(Line::raw("────────────────────────────────────────"));
+                lines.push(Line::raw(""));
+            }
+            Block::Table(table) => {
+                lines.extend(
+                    render_table_plain(table)
+                        .lines()
+                        .map(|line| Line::raw(line.to_owned())),
+                );
+                lines.push(Line::raw(""));
+            }
             Block::Preformatted(text) => {
                 lines.push(Line::raw("```"));
                 lines.extend(text.lines().map(|line| Line::raw(line.to_owned())));
@@ -138,6 +181,58 @@ pub fn render_ratatui_text(document: &Document) -> Text<'static> {
     }
 
     Text::from(lines)
+}
+
+fn render_table_plain(table: &Table) -> String {
+    let columns = table
+        .headers
+        .len()
+        .max(table.rows.iter().map(Vec::len).max().unwrap_or(0));
+    if columns == 0 {
+        return String::new();
+    }
+
+    let mut widths = vec![0usize; columns];
+    for (index, cell) in table.headers.iter().enumerate() {
+        widths[index] = widths[index].max(cell.chars().count());
+    }
+    for row in &table.rows {
+        for (index, cell) in row.iter().enumerate() {
+            widths[index] = widths[index].max(cell.chars().count());
+        }
+    }
+
+    let mut output = String::new();
+    output.push_str(&render_table_row(&table.headers, &widths));
+    output.push('\n');
+    output.push_str(&render_table_separator(&widths));
+    for row in &table.rows {
+        output.push('\n');
+        output.push_str(&render_table_row(row, &widths));
+    }
+    output
+}
+
+fn render_table_row(row: &[String], widths: &[usize]) -> String {
+    let cells = widths
+        .iter()
+        .enumerate()
+        .map(|(index, width)| {
+            let cell = row.get(index).map(String::as_str).unwrap_or("");
+            format!(" {cell:<width$} ")
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    format!("|{cells}|")
+}
+
+fn render_table_separator(widths: &[usize]) -> String {
+    let cells = widths
+        .iter()
+        .map(|width| "─".repeat(width + 2))
+        .collect::<Vec<_>>()
+        .join("┼");
+    format!("├{cells}┤")
 }
 
 #[cfg(test)]
@@ -174,5 +269,27 @@ mod tests {
 
         assert!(rendered.contains("[button] Save"));
         assert!(rendered.contains("[image] Cover <./cover.png>"));
+    }
+
+    #[test]
+    fn renders_tables_quotes_lists_and_rules() {
+        let doc = parse_document(
+            "# Layout\n\n> Polished terminal pages.\n\n- Tables\n- Quotes\n\n---\n\n| Name | Role |\n| --- | --- |\n| Simon | Builder |\n",
+        )
+        .unwrap();
+        let rendered = render_plain(&doc);
+
+        assert!(rendered.contains("> Polished terminal pages."));
+        assert!(rendered.contains("• Tables"));
+        assert!(rendered.contains("────────────────"));
+        assert!(rendered.contains("| Name  | Role    |"));
+        assert!(rendered.contains("| Simon | Builder |"));
+
+        let tui = render_ratatui_text(&doc);
+        assert!(
+            tui.lines
+                .iter()
+                .any(|line| line.spans.iter().any(|span| span.content.contains("Name")))
+        );
     }
 }

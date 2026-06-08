@@ -27,7 +27,7 @@ Preformatted content keeps spacing.
 ! action-id label="Do thing" method="POST" target="/actions/do-thing"
 ```
 
-Current parser support includes headings, paragraphs, links (`=> target label`), structured inputs (`? name ...`), action buttons (`! id ...` with `method`/`confirm`/`auth`), images, preformatted blocks, and trailing metadata after `~~~~~`. M4 renders editable inputs/actions, enforces explicit two-step confirmation for confirmed actions, collects URL-encoded form payloads, and executes prototype POST actions over network or local demo resolvers. M8 adds action capability tokens so side-effectful demo POSTs can reject unauthorized submissions before recording side effects.
+Current parser support includes headings, paragraphs, links (`=> target label`), structured inputs (`? name ...`), action buttons (`! id ...` with `method`/`confirm`/`auth`), images, quotes (`>`), lists (`-`/`*`), rules (`---`), tables (`| cell |`), preformatted blocks, and trailing metadata after `~~~~~`. M4 renders editable inputs/actions, enforces explicit two-step confirmation for confirmed actions, collects URL-encoded form payloads, and executes prototype POST actions over network or local demo resolvers. M8 adds action capability tokens so side-effectful demo POSTs can reject unauthorized submissions before recording side effects. M9 polishes the TUI with richer typography, accent rails, aligned tables, and calmer chrome.
 
 ## Crate responsibilities
 
@@ -105,3 +105,4 @@ Application shell:
 7. **M6 security indicators:** keep `jrg://` as one secure-capable scheme, load human-editable Ed25519 public keyrings, verify optional page signatures against trusted keys, and display secure/not-secure state without gatekeeping unsigned pages.
 8. **M7 encryption capabilities:** keep `jrg://` as one scheme, define XChaCha20-Poly1305 encrypted payload primitives, serialize encryption capability metadata, and support encrypted TCP request/response framing with pre-shared keys.
 9. **M8 action auth model:** add explicit `auth` capability tokens to side-effectful action buttons, carry them as `Action-Token` headers, and reject unauthorized demo POSTs before writing side effects.
+10. **M9 browser experience:** add rich renderable blocks (quotes, lists, rules, tables), improve plain/TUI rendering, and make the terminal browser more aesthetic with accent styling and aligned layouts.

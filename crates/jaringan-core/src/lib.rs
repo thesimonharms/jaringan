@@ -52,7 +52,17 @@ pub enum Block {
     Input(Input),
     Button(Button),
     Image(Image),
+    Quote(String),
+    List(Vec<String>),
+    Rule,
+    Table(Table),
     Preformatted(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Table {
+    pub headers: Vec<String>,
+    pub rows: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,7 +289,12 @@ impl SearchEntry {
                     target: link.target.clone(),
                     label: link.label.clone(),
                 }),
-                Block::Paragraph(text) | Block::Preformatted(text) => body_parts.push(text.clone()),
+                Block::Paragraph(text) | Block::Preformatted(text) | Block::Quote(text) => {
+                    body_parts.push(text.clone())
+                }
+                Block::List(items) => body_parts.push(items.join("\n")),
+                Block::Table(table) => body_parts.push(table_text(table)),
+                Block::Rule => {}
                 Block::Input(input) => body_parts.push(format!("{} {}", input.label, input.value)),
                 Block::Button(button) => body_parts.push(button.label.clone()),
                 Block::Image(image) => body_parts.push(image.alt.clone()),
@@ -580,6 +595,16 @@ fn unescape_index_field(input: &str) -> Result<String, String> {
     Ok(output)
 }
 
+fn table_text(table: &Table) -> String {
+    table
+        .headers
+        .iter()
+        .chain(table.rows.iter().flatten())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ParseError {
     #[error("unterminated preformatted block starting at line {line}")]
@@ -624,6 +649,15 @@ impl<'a> Parser<'a> {
 
             if trimmed.starts_with("```") {
                 self.parse_preformatted()?;
+            } else if trimmed.starts_with('|') {
+                self.parse_table();
+            } else if trimmed.starts_with('>') {
+                self.parse_quote();
+            } else if is_list_item(trimmed) {
+                self.parse_list();
+            } else if is_rule(trimmed) {
+                self.blocks.push(Block::Rule);
+                self.cursor += 1;
             } else if let Some(block) = parse_heading(trimmed) {
                 self.blocks.push(block);
                 self.cursor += 1;
@@ -672,6 +706,53 @@ impl<'a> Parser<'a> {
         Err(ParseError::UnterminatedPreformatted { line: start_line })
     }
 
+    fn parse_table(&mut self) {
+        let mut rows = Vec::new();
+        while let Some(line) = self.peek() {
+            let trimmed = line.trim();
+            if !trimmed.starts_with('|') {
+                break;
+            }
+            let cells = parse_table_row(trimmed);
+            if !is_table_separator(&cells) {
+                rows.push(cells);
+            }
+            self.cursor += 1;
+        }
+
+        if rows.is_empty() {
+            return;
+        }
+        let headers = rows.remove(0);
+        self.blocks.push(Block::Table(Table { headers, rows }));
+    }
+
+    fn parse_quote(&mut self) {
+        let mut lines = Vec::new();
+        while let Some(line) = self.peek() {
+            let trimmed = line.trim();
+            let Some(text) = trimmed.strip_prefix('>') else {
+                break;
+            };
+            lines.push(text.trim().to_owned());
+            self.cursor += 1;
+        }
+        self.blocks.push(Block::Quote(lines.join("\n")));
+    }
+
+    fn parse_list(&mut self) {
+        let mut items = Vec::new();
+        while let Some(line) = self.peek() {
+            let trimmed = line.trim();
+            let Some(item) = list_item_text(trimmed) else {
+                break;
+            };
+            items.push(item.to_owned());
+            self.cursor += 1;
+        }
+        self.blocks.push(Block::List(items));
+    }
+
     fn parse_metadata(&mut self) {
         self.cursor += 1;
         let metadata = self.lines[self.cursor..].join("\n");
@@ -687,6 +768,10 @@ impl<'a> Parser<'a> {
             let trimmed = line.trim();
             if trimmed.is_empty()
                 || trimmed.starts_with("```")
+                || trimmed.starts_with('|')
+                || trimmed.starts_with('>')
+                || is_list_item(trimmed)
+                || is_rule(trimmed)
                 || parse_heading(trimmed).is_some()
                 || parse_link(trimmed).is_some()
                 || parse_input(trimmed).is_some()
@@ -715,6 +800,38 @@ fn parse_heading(line: &str) -> Option<Block> {
         level: hashes as u8,
         text: text.trim().to_owned(),
     })
+}
+
+fn is_rule(line: &str) -> bool {
+    matches!(line, "---" | "***" | "___")
+}
+
+fn is_list_item(line: &str) -> bool {
+    list_item_text(line).is_some()
+}
+
+fn list_item_text(line: &str) -> Option<&str> {
+    line.strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+}
+
+fn parse_table_row(line: &str) -> Vec<String> {
+    line.trim_matches('|')
+        .split('|')
+        .map(|cell| cell.trim().to_owned())
+        .collect()
+}
+
+fn is_table_separator(cells: &[String]) -> bool {
+    !cells.is_empty()
+        && cells.iter().all(|cell| {
+            let trimmed = cell.trim();
+            trimmed.len() >= 3
+                && trimmed.chars().all(|ch| matches!(ch, '-' | ':' | ' '))
+                && trimmed.chars().any(|ch| ch == '-')
+        })
 }
 
 fn parse_link(line: &str) -> Option<Link> {
@@ -920,6 +1037,34 @@ mod tests {
                     method: ActionMethod::Post,
                     confirm: Some("Submit search?".into()),
                     auth: Some("demo-search".into())
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_tables_quotes_lists_and_rules() {
+        let doc = parse_document(
+            "# Rich layout\n\n> Keep pages beautiful.\n> Even in terminals.\n\n- fast\n- calm\n- readable\n\n---\n\n| Name | Role |\n| --- | --- |\n| Simon | Builder |\n| Jaringan | Browser |\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            doc.blocks,
+            vec![
+                Block::Heading {
+                    level: 1,
+                    text: "Rich layout".into()
+                },
+                Block::Quote("Keep pages beautiful.\nEven in terminals.".into()),
+                Block::List(vec!["fast".into(), "calm".into(), "readable".into()]),
+                Block::Rule,
+                Block::Table(Table {
+                    headers: vec!["Name".into(), "Role".into()],
+                    rows: vec![
+                        vec!["Simon".into(), "Builder".into()],
+                        vec!["Jaringan".into(), "Browser".into()]
+                    ]
                 })
             ]
         );
