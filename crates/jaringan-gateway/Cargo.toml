@@ -1,0 +1,18 @@
+[package]
+name = "jaringan-gateway"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+axum.workspace = true
+clap = { workspace = true, features = ["derive"] }
+jaringan-core = { path = "../jaringan-core" }
+jaringan-protocol = { path = "../jaringan-protocol" }
+jaringan-render = { path = "../jaringan-render" }
+reqwest = { workspace = true, features = ["blocking"] }
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
