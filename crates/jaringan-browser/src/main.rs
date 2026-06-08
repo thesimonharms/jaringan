@@ -3,7 +3,7 @@ use std::{
     io::{self, Stdout},
     net::TcpListener,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{Context, bail};
@@ -14,10 +14,11 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use jaringan_browser::{
-    ActionConfirmation, BrowserMode, BrowserState, PageLocation, cache_filename_for_url, go_back,
-    go_forward, navigate_to, resolve_target, scroll_down, scroll_page_down, scroll_page_up,
-    scroll_to_bottom, scroll_to_top, scroll_up, selection_down, selection_first, selection_last,
-    selection_up, switch_mode, toggle_help, toggle_mode,
+    ActionConfirmation, BrowserMode, BrowserState, PageLocation,
+    cache_filename_for_url, go_back, go_forward, navigate_to, resolve_target, scroll_down,
+    scroll_page_down, scroll_page_up, scroll_to_bottom, scroll_to_top, scroll_up,
+    selection_down, selection_first, selection_last, selection_up, switch_mode,
+    toggle_mode, toggle_overlay,
 };
 use jaringan_core::{
     ActionMethod, Block, Document, Image, Input, PublicKeyring, SearchEntry, SearchIndex,
@@ -86,8 +87,17 @@ enum Command {
         #[arg(long)]
         index: Option<PathBuf>,
     },
+    /// Scaffold a new Jaringan site in the given directory.
+    Init {
+        /// Target directory for the new site.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Open a local path or jrg:// URL in the interactive terminal browser.
-    Open { target: String },
+    Open {
+        /// URL or file path to open (default: welcome page).
+        target: Option<String>,
+    },
     /// Run the JRG-HTTP two-way gateway.
     Gateway {
         #[command(subcommand)]
@@ -235,6 +245,7 @@ fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        Command::Init { path } => init_jrg_site(&path)?,
         Command::Open { target } => run_tui(target)?,
         Command::Gateway { command } => match command {
             GatewayCommand::ServeHttp {
@@ -418,7 +429,7 @@ fn parse_32_byte_hex_key(input: &str) -> anyhow::Result<[u8; 32]> {
     Ok(bytes)
 }
 
-fn run_tui(target: String) -> anyhow::Result<()> {
+fn run_tui(target: Option<String>) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -436,99 +447,190 @@ fn run_tui(target: String) -> anyhow::Result<()> {
 
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    target: String,
+    target: Option<String>,
 ) -> anyhow::Result<()> {
-    let first = parse_start_location(&target)?;
+    let (first, mut page) = match target {
+        Some(t) => {
+            let loc = parse_start_location(&t)?;
+            let p = load_location(&loc)?;
+            (p.location.clone(), p)
+        }
+        None => {
+            let doc = welcome_document();
+            let p = LoadedPage {
+                location: PageLocation::File(PathBuf::from("welcome")),
+                items: collect_items(&doc),
+                document: doc,
+                signature_status: SignatureStatus::Unsigned,
+            };
+            (p.location.clone(), p)
+        }
+    };
+
     let mut state = BrowserState::new(first.clone());
-    let mut page = load_location(&first)?;
+    state.record_current(page.document.title().unwrap_or("Untitled"));
     let started = Instant::now();
+    let mut file_mtime: Option<SystemTime> = file_mtime_of(&page.location);
 
     loop {
         clamp_selection(&mut state, page.items.len());
         let frame_result = terminal.draw(|frame| draw(frame, &state, &page, started.elapsed()));
-        if state.show_help {
-            terminal.draw(draw_help_overlay)?;
-        } else if let Err(e) = frame_result {
+        if let Err(e) = frame_result {
             return Err(e.into());
+        }
+
+        // Check if the current .jrg file changed on disk (live reload)
+        if matches!(page.location, PageLocation::File(ref p) if p.is_file()) {
+            check_live_reload(&mut page, &mut state, &mut file_mtime);
         }
 
         if event::poll(Duration::from_millis(120))? {
             match event::read()? {
-                Event::Key(key) => match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Char(ch) if is_selected_input(&page, state.selected) => {
-                        edit_selected_input(&mut state, &mut page, InputEdit::Append(ch));
-                    }
-                    KeyCode::Backspace if is_selected_input(&page, state.selected) => {
-                        edit_selected_input(&mut state, &mut page, InputEdit::Backspace);
-                    }
-                    KeyCode::Tab => toggle_mode(&mut state),
-                    KeyCode::Char('s') => switch_mode(&mut state, BrowserMode::Scroll),
-                    KeyCode::Char('v') => switch_mode(&mut state, BrowserMode::Selection),
-                    KeyCode::Char('?') | KeyCode::Char('h') => toggle_help(&mut state),
-                    KeyCode::Down | KeyCode::Char('j') => match state.mode {
-                        BrowserMode::Selection => selection_down(&mut state, page.items.len()),
-                        BrowserMode::Scroll => {
-                            let line_count = render_lines(&page, state.selected).len();
-                            let viewport_height = terminal.size()?.height.saturating_sub(6);
-                            scroll_down(&mut state, line_count, viewport_height);
-                        }
-                    },
-                    KeyCode::Up | KeyCode::Char('k') => match state.mode {
-                        BrowserMode::Selection => selection_up(&mut state),
-                        BrowserMode::Scroll => scroll_up(&mut state),
-                    },
-                    KeyCode::PageDown | KeyCode::Char(' ') => match state.mode {
-                        BrowserMode::Selection => selection_down(&mut state, page.items.len()),
-                        BrowserMode::Scroll => {
-                            let line_count = render_lines(&page, state.selected).len();
-                            let viewport_height = terminal.size()?.height.saturating_sub(6);
-                            scroll_page_down(&mut state, line_count, viewport_height);
-                        }
-                    },
-                    KeyCode::PageUp => match state.mode {
-                        BrowserMode::Selection => selection_up(&mut state),
-                        BrowserMode::Scroll => {
-                            let line_count = render_lines(&page, state.selected).len();
-                            let viewport_height = terminal.size()?.height.saturating_sub(6);
-                            scroll_page_up(&mut state, line_count, viewport_height);
-                        }
-                    },
-                    KeyCode::Home => selection_first(&mut state),
-                    KeyCode::End => selection_last(&mut state, page.items.len()),
-                    KeyCode::Char('g') => scroll_to_top(&mut state),
-                    KeyCode::Char('G') => {
-                        let line_count = render_lines(&page, state.selected).len();
-                        let viewport_height = terminal.size()?.height.saturating_sub(6);
-                        scroll_to_bottom(&mut state, line_count, viewport_height);
-                    }
-                    KeyCode::Enter => activate_selected(&mut state, &mut page)?,
-                    KeyCode::Char('b') | KeyCode::Backspace => {
-                        if go_back(&mut state) {
-                            match &state.current {
-                                location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
-                                    page = load_location(location)?;
+                Event::Key(key) => {
+                    if state.overlay.is_some() {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('h') | KeyCode::Char('?') => {
+                                state.overlay = None;
+                                state.status = String::from("Closed");
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                let count = match state.overlay {
+                                    Some(jaringan_browser::Overlay::History) => state.history.len(),
+                                    Some(jaringan_browser::Overlay::Bookmarks) => state.bookmarks.len(),
+                                    _ => 0,
+                                };
+                                if count > 0 {
+                                    state.overlay_selected = (state.overlay_selected + 1).min(count - 1);
                                 }
-                                PageLocation::Unsupported(_) => {}
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                state.overlay_selected = state.overlay_selected.saturating_sub(1);
+                            }
+                            KeyCode::Enter => {
+                                let url = match state.overlay {
+                                    Some(jaringan_browser::Overlay::History) => {
+                                        state.history.get(state.overlay_selected).map(|e| e.url.clone())
+                                    }
+                                    Some(jaringan_browser::Overlay::Bookmarks) => {
+                                        state.bookmarks.get(state.overlay_selected).map(|b| b.url.clone())
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(url) = url {
+                                    state.overlay = None;
+                                    let location = parse_start_location(&url).unwrap_or_else(|_| {
+                                        PageLocation::Unsupported(url.clone())
+                                    });
+                                    if matches!(location, PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) {
+                                        state.status = format!("⠋ Loading {url}");
+                                        let loaded = load_location(&location)?;
+                                        navigate_to(&mut state, loaded.location.clone());
+                                        state.record_current(loaded.document.title().unwrap_or("Untitled"));
+                                        state.status = "Opened from history".to_string();
+                                        page = loaded;
+                                        file_mtime = file_mtime_of(&page.location);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char(ch) if is_selected_input(&page, state.selected) => {
+                            edit_selected_input(&mut state, &mut page, InputEdit::Append(ch));
+                        }
+                        KeyCode::Backspace if is_selected_input(&page, state.selected) => {
+                            edit_selected_input(&mut state, &mut page, InputEdit::Backspace);
+                        }
+                        KeyCode::Tab => toggle_mode(&mut state),
+                        KeyCode::Char('s') => switch_mode(&mut state, BrowserMode::Scroll),
+                        KeyCode::Char('v') => switch_mode(&mut state, BrowserMode::Selection),
+                        KeyCode::Char('?') | KeyCode::Char('h') => {
+                            state.overlay = None;
+                            state.status = String::from("Close overlays");
+                        }
+                        KeyCode::Char('H') => toggle_overlay(&mut state, jaringan_browser::Overlay::History),
+                        KeyCode::Char('B') => toggle_overlay(&mut state, jaringan_browser::Overlay::Bookmarks),
+                        KeyCode::Down | KeyCode::Char('j') => match state.mode {
+                            BrowserMode::Selection => selection_down(&mut state, page.items.len()),
+                            BrowserMode::Scroll => {
+                                let line_count = render_lines(&page, state.selected).len();
+                                let viewport_height = terminal.size()?.height.saturating_sub(6);
+                                scroll_down(&mut state, line_count, viewport_height);
+                            }
+                        },
+                        KeyCode::Up | KeyCode::Char('k') => match state.mode {
+                            BrowserMode::Selection => selection_up(&mut state),
+                            BrowserMode::Scroll => scroll_up(&mut state),
+                        },
+                        KeyCode::PageDown | KeyCode::Char(' ') => match state.mode {
+                            BrowserMode::Selection => selection_down(&mut state, page.items.len()),
+                            BrowserMode::Scroll => {
+                                let line_count = render_lines(&page, state.selected).len();
+                                let viewport_height = terminal.size()?.height.saturating_sub(6);
+                                scroll_page_down(&mut state, line_count, viewport_height);
+                            }
+                        },
+                        KeyCode::PageUp => match state.mode {
+                            BrowserMode::Selection => selection_up(&mut state),
+                            BrowserMode::Scroll => {
+                                let line_count = render_lines(&page, state.selected).len();
+                                let viewport_height = terminal.size()?.height.saturating_sub(6);
+                                scroll_page_up(&mut state, line_count, viewport_height);
+                            }
+                        },
+                        KeyCode::Home => selection_first(&mut state),
+                        KeyCode::End => selection_last(&mut state, page.items.len()),
+                        KeyCode::Char('g') => scroll_to_top(&mut state),
+                        KeyCode::Char('G') => {
+                            let line_count = render_lines(&page, state.selected).len();
+                            let viewport_height = terminal.size()?.height.saturating_sub(6);
+                            scroll_to_bottom(&mut state, line_count, viewport_height);
+                        }
+                        KeyCode::Char('d') => {
+                            if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                                state.toggle_bookmark_current(page.document.title().unwrap_or("Untitled"));
                             }
                         }
-                    }
-                    KeyCode::Char('f') => {
-                        if go_forward(&mut state) {
-                            match &state.current {
-                                location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
-                                    page = load_location(location)?;
+                        KeyCode::Enter => {
+                            activate_selected(&mut state, &mut page)?;
+                            file_mtime = file_mtime_of(&page.location);
+                        }
+                        KeyCode::Char('b') | KeyCode::Backspace => {
+                            if go_back(&mut state) {
+                                match &state.current {
+                                    location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
+                                        page = load_location(location)?;
+                                        file_mtime = file_mtime_of(&page.location);
+                                        state.record_current(page.document.title().unwrap_or("Untitled"));
+                                    }
+                                    PageLocation::Unsupported(_) => {}
                                 }
-                                PageLocation::Unsupported(_) => {}
                             }
                         }
+                        KeyCode::Char('f') => {
+                            if go_forward(&mut state) {
+                                match &state.current {
+                                    location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
+                                        page = load_location(location)?;
+                                        file_mtime = file_mtime_of(&page.location);
+                                        state.record_current(page.document.title().unwrap_or("Untitled"));
+                                    }
+                                    PageLocation::Unsupported(_) => {}
+                                }
+                            }
+                        }
+                        KeyCode::Char('r') => {
+                            page = load_location(&page.location)?;
+                            file_mtime = file_mtime_of(&page.location);
+                            state.status = String::from("Reloaded");
+                        }
+                        _ => {}
                     }
-                    KeyCode::Char('r') => {
-                        page = load_location(&page.location)?;
-                        state.status = String::from("Reloaded");
-                    }
-                    _ => {}
-                },
+                }
                 Event::Resize(_, _) => {}
                 _ => {}
             }
@@ -547,9 +649,10 @@ fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage) -> anyhow:
     match item {
         InteractiveItem::Link { label, target } => match resolve_target(&page.location, &target) {
             location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
-                state.status = format!("⠋ Loading {}", location_label(&location));
+                state.status = format!("⠋ Loading {}", location.display_url());
                 let loaded = load_location(&location)?;
                 navigate_to(state, loaded.location.clone());
+                state.record_current(loaded.document.title().unwrap_or("Untitled"));
                 state.status = format!("Opened {label}");
                 *page = loaded;
             }
@@ -845,7 +948,13 @@ fn download_remote_image(url: &str) -> String {
 fn load_location(location: &PageLocation) -> anyhow::Result<LoadedPage> {
     let keyring = default_keyring();
     match location {
-        PageLocation::File(path) => load_file_page_with_keyring(path, &keyring),
+        PageLocation::File(path) => {
+            if path.is_dir() {
+                load_directory_page(path, &keyring)
+            } else {
+                load_file_page_with_keyring(path, &keyring)
+            }
+        }
         PageLocation::Network(url) => load_network_page_with_keyring(url, &keyring),
         PageLocation::Web(url) => load_web_page(url, &keyring),
         PageLocation::Unsupported(target) => bail!("unsupported target: {target}"),
@@ -1000,12 +1109,7 @@ fn parse_start_location(target: &str) -> anyhow::Result<PageLocation> {
 }
 
 fn location_label(location: &PageLocation) -> String {
-    match location {
-        PageLocation::File(path) => path.display().to_string(),
-        PageLocation::Network(url) => url.to_string(),
-        PageLocation::Web(url) => url.clone(),
-        PageLocation::Unsupported(target) => target.clone(),
-    }
+    location.display_url()
 }
 
 fn default_keyring() -> PublicKeyring {
@@ -1107,6 +1211,7 @@ fn draw(
         ])
         .split(area);
 
+    // ── Header ──────────────────────────────────────────────────────
     let title = page.document.title().unwrap_or("Untitled Jaringan page");
     let header = Paragraph::new(Line::from(vec![
         Span::styled("✦ jaringan ", Style::default().fg(Color::Cyan).bold()),
@@ -1124,6 +1229,7 @@ fn draw(
     );
     frame.render_widget(header, chunks[0]);
 
+    // ── Body ─────────────────────────────────────────────────────────
     let body = Paragraph::new(render_lines(page, state.selected))
         .block(
             TuiBlock::default()
@@ -1134,21 +1240,46 @@ fn draw(
         .wrap(Wrap { trim: false });
     frame.render_widget(body, chunks[1]);
 
+    // ── Footer ───────────────────────────────────────────────────────
     let spinner = spinner(elapsed);
     let mode_label = match state.mode {
-        BrowserMode::Selection => "SELECTION",
-        BrowserMode::Scroll => "SCROLL",
+        BrowserMode::Selection => "SEL",
+        BrowserMode::Scroll => "SCR",
     };
+    let mode_color = match state.mode {
+        BrowserMode::Selection => Color::Green,
+        BrowserMode::Scroll => Color::Yellow,
+    };
+
+    // Position percentage
+    let line_count = render_lines(page, state.selected).len();
+    let viewport_height = chunks[1].height.saturating_sub(2);
+    let pct = if line_count > viewport_height as usize {
+        ((state.scroll_offset as f64) / (line_count.saturating_sub(viewport_height as usize) as f64) * 100.0) as u8
+    } else {
+        100
+    };
+
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(format!(" {spinner} "), Style::default().fg(Color::Magenta)),
-        Span::styled(format!("{mode_label} "), Style::default().fg(Color::Cyan).bold()),
+        Span::styled(
+            format!(" {mode_label} "),
+            Style::default().fg(Color::Black).bg(mode_color).bold(),
+        ),
+        Span::raw(" "),
         Span::styled(&state.status, Style::default().fg(Color::Yellow)),
+        Span::raw(" · "),
+        Span::styled(format!("{pct}%"), Style::default().fg(Color::DarkGray)),
         Span::raw("  "),
         Span::styled(
-            "tab toggle • s scroll • v selection • j/k move • enter open/press/view • b back • r reload • q quit",
+            "j/k ↓↑ • Enter ↵ • H history • B bookmarks • ? help • q quit",
             Style::default().fg(Color::DarkGray),
         ),
-        Span::raw(format!("  {}", location_label(&page.location))),
+        Span::raw("  "),
+        Span::styled(
+            location_label(&page.location),
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+        ),
     ]))
     .block(
         TuiBlock::default()
@@ -1156,9 +1287,18 @@ fn draw(
             .border_style(Style::default().fg(Color::Cyan)),
     );
     frame.render_widget(footer, chunks[2]);
+
+    // ── Overlays ─────────────────────────────────────────────────────
+    match state.overlay {
+        Some(jaringan_browser::Overlay::Help) => draw_help_overlay(frame, state),
+        Some(jaringan_browser::Overlay::History) => draw_history_overlay(frame, state),
+        Some(jaringan_browser::Overlay::Bookmarks) => draw_bookmarks_overlay(frame, state),
+        None => {}
+    }
 }
 
-fn draw_help_overlay(frame: &mut ratatui::Frame<'_>) {
+/// Draw the help overlay.
+fn draw_help_overlay(frame: &mut ratatui::Frame<'_>, _state: &BrowserState) {
     let area = frame.area();
     let overlay_area = Layout::default()
         .direction(Direction::Vertical)
@@ -1171,7 +1311,8 @@ fn draw_help_overlay(frame: &mut ratatui::Frame<'_>) {
     let help_block = Paragraph::new(Text::from(help_lines()))
         .block(
             TuiBlock::default()
-                .title(" Help ")
+                .title(" ⌨ Help ")
+                .title_alignment(ratatui::layout::Alignment::Center)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan).bold()),
         )
@@ -1179,6 +1320,76 @@ fn draw_help_overlay(frame: &mut ratatui::Frame<'_>) {
 
     frame.render_widget(Clear, overlay_area[1]);
     frame.render_widget(help_block, overlay_area[1]);
+}
+
+/// Draw the history overlay.
+fn draw_history_overlay(frame: &mut ratatui::Frame<'_>, state: &BrowserState) {
+    let area = frame.area();
+    let overlay_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Max(area.height.saturating_sub(4)),
+        ])
+        .split(area);
+
+    let mut text = String::new();
+    if state.history.is_empty() {
+        text.push_str("  No history yet. Browse some pages!\n");
+    } else {
+        for (i, entry) in state.history.iter().rev().enumerate() {
+            let marker = if i == state.overlay_selected { "❯ " } else { "  " };
+            text.push_str(&format!("{marker}{}\n  {}\n", entry.title, entry.url));
+        }
+    }
+
+    let block = Paragraph::new(text)
+        .block(
+            TuiBlock::default()
+                .title(" 📜 History ")
+                .title_alignment(ratatui::layout::Alignment::Center)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue).bold()),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, overlay_area[1]);
+    frame.render_widget(block, overlay_area[1]);
+}
+
+/// Draw the bookmarks overlay.
+fn draw_bookmarks_overlay(frame: &mut ratatui::Frame<'_>, state: &BrowserState) {
+    let area = frame.area();
+    let overlay_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Max(area.height.saturating_sub(4)),
+        ])
+        .split(area);
+
+    let mut text = String::from("  Ctrl+d  Bookmark/unbookmark current page\n\n");
+    if state.bookmarks.is_empty() {
+        text.push_str("  No bookmarks yet. Press Ctrl+d on a page to bookmark it!\n");
+    } else {
+        for (i, bm) in state.bookmarks.iter().enumerate() {
+            let marker = if i == state.overlay_selected { "❯ " } else { "  " };
+            text.push_str(&format!("{marker}◆ {}\n  {}\n", bm.name, bm.url));
+        }
+    }
+
+    let block = Paragraph::new(text)
+        .block(
+            TuiBlock::default()
+                .title(" ★ Bookmarks ")
+                .title_alignment(ratatui::layout::Alignment::Center)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Magenta).bold()),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, overlay_area[1]);
+    frame.render_widget(block, overlay_area[1]);
 }
 
 fn render_lines(page: &LoadedPage, selected: usize) -> Vec<Line<'static>> {
@@ -1394,58 +1605,331 @@ fn canonicalish(path: &Path) -> PathBuf {
 fn help_lines() -> Vec<Line<'static>> {
     vec![
         Line::from(Span::styled(
-            "Browser keys",
+            "Navigation",
+            Style::default().fg(Color::Cyan).bold(),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("  j/k ↓/↑", Style::default().fg(Color::Yellow)),
+            Span::raw("     Move selection / scroll"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Enter", Style::default().fg(Color::Yellow)),
+            Span::raw("       Open link / Press button / Edit input"),
+        ]),
+        Line::from(vec![
+            Span::styled("  b / f", Style::default().fg(Color::Yellow)),
+            Span::raw("       Back / Forward"),
+        ]),
+        Line::from(vec![
+            Span::styled("  r", Style::default().fg(Color::Yellow)),
+            Span::raw("          Reload page"),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "Scrolling",
+            Style::default().fg(Color::Cyan).bold(),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("  PgDn/Space / PgUp", Style::default().fg(Color::Yellow)),
+            Span::raw("  Page down / up"),
+        ]),
+        Line::from(vec![
+            Span::styled("  g / G", Style::default().fg(Color::Yellow)),
+            Span::raw("       Top / Bottom"),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "History & Bookmarks",
+            Style::default().fg(Color::Cyan).bold(),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("  H", Style::default().fg(Color::Yellow)),
+            Span::raw("          Open history panel"),
+        ]),
+        Line::from(vec![
+            Span::styled("  B", Style::default().fg(Color::Yellow)),
+            Span::raw("          Open bookmarks panel"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+d", Style::default().fg(Color::Yellow)),
+            Span::raw("    Bookmark/unbookmark current page"),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "Modes",
+            Style::default().fg(Color::Cyan).bold(),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("  Tab / s / v", Style::default().fg(Color::Yellow)),
+            Span::raw("  Toggle / Scroll / Selection mode"),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("  Home / End", Style::default().fg(Color::Yellow)),
+            Span::raw("  First / Last item"),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "General",
             Style::default().fg(Color::Cyan).bold(),
         )),
         Line::raw(""),
         Line::from(vec![
             Span::styled("  ? / h", Style::default().fg(Color::Yellow)),
-            Span::raw("      Toggle help overlay"),
-        ]),
-        Line::from(vec![
-            Span::styled("  j / k / ↓ / ↑", Style::default().fg(Color::Yellow)),
-            Span::raw("  Move selection"),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  PgDn / PgUp / Space / b",
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::raw("  Scroll page / back"),
-        ]),
-        Line::from(vec![
-            Span::styled("  g / G", Style::default().fg(Color::Yellow)),
-            Span::raw("      Jump to top / bottom"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Home / End", Style::default().fg(Color::Yellow)),
-            Span::raw("  First item / Last item"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Enter", Style::default().fg(Color::Yellow)),
-            Span::raw("      Open link / Press button / Edit input"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Tab / s / v", Style::default().fg(Color::Yellow)),
-            Span::raw("      Toggle / Scroll / Selection mode"),
-        ]),
-        Line::from(vec![
-            Span::styled("  b", Style::default().fg(Color::Yellow)),
-            Span::raw("      Go back"),
-        ]),
-        Line::from(vec![
-            Span::styled("  f", Style::default().fg(Color::Yellow)),
-            Span::raw("      Go forward"),
-        ]),
-        Line::from(vec![
-            Span::styled("  r", Style::default().fg(Color::Yellow)),
-            Span::raw("      Reload page"),
+            Span::raw("      Toggle help"),
         ]),
         Line::from(vec![
             Span::styled("  q / Esc", Style::default().fg(Color::Yellow)),
             Span::raw("      Quit"),
         ]),
     ]
+}
+
+// ── init ──────────────────────────────────────────────────────────────
+
+/// Scaffold a new Jaringan site with example pages.
+fn init_jrg_site(path: &Path) -> anyhow::Result<()> {
+    let path = if path == Path::new(".") {
+        std::env::current_dir().context("failed to get current directory")?
+    } else {
+        path.to_path_buf()
+    };
+
+    if !path.exists() {
+        fs::create_dir_all(&path)
+            .with_context(|| format!("failed to create directory {}", path.display()))?;
+    }
+
+    let index_path = path.join("index.jrg");
+    if index_path.exists() {
+        bail!("{} already exists -- refusing to overwrite", index_path.display());
+    }
+    fs::write(
+        &index_path,
+        concat!(
+            "# My Jaringan Site\n",
+            "\n",
+            "Welcome to your new Jaringan site!\n",
+            "\n",
+            "## Navigation\n",
+            "\n",
+            "=> pages/getting-started.jrg Getting Started\n",
+            "\n",
+            "Edit index.jrg to build your own pages.\n",
+            "\n",
+            "~~~~~\n",
+            "title: Home\n",
+            "tags: index, home\n",
+        ),
+    )
+    .with_context(|| format!("failed to write {}", index_path.display()))?;
+
+    let pages_dir = path.join("pages");
+    fs::create_dir_all(&pages_dir)
+        .with_context(|| "failed to create pages directory".to_string())?;
+    fs::write(
+        pages_dir.join("getting-started.jrg"),
+        concat!(
+            "# Getting Started\n",
+            "\n",
+            "Jaringan pages use a lightweight markup format.\n",
+            "\n",
+            "## Headings\n",
+            "\n",
+            "# Title (level 1)\n",
+            "## Subtitle (level 2)\n",
+            "\n",
+            "## Links\n",
+            "\n",
+            "=> target.jrg Link Label\n",
+            "\n",
+            "## Buttons\n",
+            "\n",
+            "! action-id label=\"Do\" method=\"POST\" target=\"/action\"\n",
+            "\n",
+            "~~~~~\n",
+            "title: Getting Started\n",
+            "tags: tutorial, basics\n",
+        ),
+    )
+    .with_context(|| "failed to write getting-started.jrg".to_string())?;
+
+    println!("Scaffolded Jaringan site at {}", path.display());
+    println!("  open:  jaringan-browser open {}", path.display());
+    println!("  serve: jaringan-browser serve {} 127.0.0.1:7070", path.display());
+    Ok(())
+}
+
+// ── Welcome page ──────────────────────────────────────────────────────
+
+/// Built-in welcome page shown when no target is provided.
+fn welcome_document() -> Document {
+    Document::new(vec![
+        Block::Heading {
+            level: 1,
+            text: "Welcome to Jaringan".to_owned(),
+        },
+        Block::Paragraph(
+            "Jaringan is a terminal-native browser for Jaringan pages - \
+             a lightweight, signed page format for local and network content."
+                .to_owned(),
+        ),
+        Block::Heading {
+            level: 2,
+            text: "Getting Started".to_owned(),
+        },
+        Block::Link(jaringan_core::Link {
+            target: ".".to_owned(),
+            label: "Browse .jrg files in current directory".to_owned(),
+        }),
+        Block::Paragraph("Press Enter on the link above, or run:".to_owned()),
+        Block::Preformatted("  jaringan-browser open <path-or-jrg-url>".to_owned()),
+        Block::Heading {
+            level: 2,
+            text: "Quick Commands".to_owned(),
+        },
+        Block::List(vec![
+            "j/k down/up - Move selection".to_owned(),
+            "Enter - Open link / press button".to_owned(),
+            "b/f - Back / Forward".to_owned(),
+            "H - History panel".to_owned(),
+            "B - Bookmarks panel".to_owned(),
+            "Ctrl+d - Bookmark/unbookmark page".to_owned(),
+            "? - Toggle help".to_owned(),
+        ]),
+        Block::Heading {
+            level: 2,
+            text: "Scaffold a New Site".to_owned(),
+        },
+        Block::Paragraph("Create a new Jaringan site with:".to_owned()),
+        Block::Preformatted("  jaringan-browser init ./my-site".to_owned()),
+        Block::Rule,
+        Block::Paragraph("Press ? for full help, or q to quit.".to_owned()),
+    ])
+}
+
+// ── Directory listing ─────────────────────────────────────────────────
+
+/// Generate a directory-listing document for a directory with .jrg files.
+fn load_directory_page(path: &Path, _keyring: &PublicKeyring) -> anyhow::Result<LoadedPage> {
+    let dir = canonicalish(path);
+    let mut entries: Vec<_> = fs::read_dir(&dir)
+        .with_context(|| format!("failed to read directory {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let is_jrg = e
+                .path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext == "jrg");
+            let is_subdir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            is_jrg || is_subdir
+        })
+        .collect();
+    entries.sort_by_key(|e| e.path());
+
+    let jrg_count = entries
+        .iter()
+        .filter(|e| {
+            e.path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext == "jrg")
+        })
+        .count();
+
+    let mut blocks = vec![
+        Block::Heading {
+            level: 1,
+            text: format!("Directory: {}", dir.display()),
+        },
+        Block::Paragraph(format!("Found {} .jrg files", jrg_count)),
+    ];
+
+    if entries.is_empty() {
+        blocks.push(Block::Paragraph(
+            "No .jrg files found. Run `jaringan-browser init` \
+             or create .jrg files manually."
+                .to_owned(),
+        ));
+    } else {
+        for entry in &entries {
+            let entry_path = entry.path();
+            let relative = entry_path
+                .strip_prefix(&dir)
+                .unwrap_or(&entry_path)
+                .to_string_lossy()
+                .to_string();
+            if entry_path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext == "jrg")
+            {
+                let name = entry_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                blocks.push(Block::Link(jaringan_core::Link {
+                    target: relative,
+                    label: name.to_owned(),
+                }));
+            } else if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let name = entry_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                blocks.push(Block::Link(jaringan_core::Link {
+                    target: relative,
+                    label: format!("Directory: {name}/"),
+                }));
+            }
+        }
+    }
+
+    let document = Document::new(blocks);
+    Ok(LoadedPage {
+        location: PageLocation::File(dir),
+        items: collect_items(&document),
+        document,
+        signature_status: SignatureStatus::Unsigned,
+    })
+}
+
+// ── Live reload ───────────────────────────────────────────────────────
+
+/// Get the modification time of a file-backed page, if applicable.
+fn file_mtime_of(location: &PageLocation) -> Option<SystemTime> {
+    match location {
+        PageLocation::File(path) if path.is_file() => {
+            fs::metadata(path).ok()?.modified().ok()
+        }
+        _ => None,
+    }
+}
+
+/// Check if the current file has changed on disk and reload if so.
+fn check_live_reload(
+    page: &mut LoadedPage,
+    state: &mut BrowserState,
+    file_mtime: &mut Option<SystemTime>,
+) {
+    let Some(current_mtime) = file_mtime_of(&page.location) else {
+        return;
+    };
+    let changed = file_mtime.map_or(true, |prev| current_mtime != prev);
+    if !changed {
+        return;
+    }
+    *file_mtime = Some(current_mtime);
+    if let Ok(reloaded) = load_location(&page.location) {
+        *page = reloaded;
+        state.record_current(page.document.title().unwrap_or("Untitled"));
+        state.status = String::from("Reloaded (file changed)");
+    }
 }
 
 #[cfg(test)]
@@ -1544,11 +2028,9 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(rendered.contains("Browser keys"));
+        assert!(rendered.contains("Navigation"));
         assert!(rendered.contains("? / h"));
-        assert!(rendered.contains("back"));
-        assert!(rendered.contains("forward"));
-        assert!(rendered.contains("PgDn / PgUp"));
+        assert!(rendered.contains("Back / Forward"));
         assert!(rendered.contains("g / G"));
     }
 
