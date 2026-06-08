@@ -1,10 +1,8 @@
 //! JRG Gateway — binary entrypoint
 //!
 //! Usage:
-//!   cargo run -p jaringan-gateway -- --http-listen 127.0.0.1:8080 --jrg-host 127.0.0.1:7070
 //!   cargo run -p jaringan-gateway -- serve-http --http-listen 127.0.0.1:8080 --jrg-host 127.0.0.1:7070
-
-use std::net::TcpListener;
+//!   cargo run -p jaringan-gateway -- jrg-to-http --jrg-listen 127.0.0.1:7071
 
 use clap::{Parser, Subcommand};
 
@@ -63,8 +61,7 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let cli = Cli::parse();
 
     match cli.command {
@@ -74,19 +71,23 @@ async fn main() {
             enable_http_bridge,
             timeout,
         } => {
-            let config = HttpToJrgGatewayConfig {
-                listen_addr: http_listen,
-                jrg_host,
-                enable_http_bridge,
-                timeout_secs: timeout,
-            };
+            // Tokio runtime is needed only for the axum HTTP server
+            let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+            rt.block_on(async {
+                let config = HttpToJrgGatewayConfig {
+                    listen_addr: http_listen,
+                    jrg_host,
+                    enable_http_bridge,
+                    timeout_secs: timeout,
+                };
 
-            let gateway = HttpToJrgGateway::new(config);
-            eprintln!("Starting HTTP→JRG gateway...");
-            if let Err(e) = gateway.serve().await {
-                eprintln!("Gateway error: {e}");
-                std::process::exit(1);
-            }
+                let gateway = HttpToJrgGateway::new(config);
+                eprintln!("Starting HTTP→JRG gateway...");
+                if let Err(e) = gateway.serve().await {
+                    eprintln!("Gateway error: {e}");
+                    std::process::exit(1);
+                }
+            });
         }
 
         Command::JrgToHttp {
@@ -103,7 +104,7 @@ async fn main() {
                 follow_redirects,
             });
 
-            let listener = match TcpListener::bind(&jrg_listen) {
+            let listener = match std::net::TcpListener::bind(&jrg_listen) {
                 Ok(l) => l,
                 Err(e) => {
                     eprintln!("Failed to bind JRG TCP listener on {jrg_listen}: {e}");

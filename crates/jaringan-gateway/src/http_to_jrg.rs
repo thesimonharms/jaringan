@@ -22,7 +22,7 @@
 
 use axum::{
     Router,
-    extract::{Path, Query, State},
+    extract::{Query, State},
     http::{Method, StatusCode as HttpStatus},
     response::{Html, IntoResponse, Response},
     routing::get,
@@ -83,14 +83,9 @@ impl HttpToJrgGateway {
             config: Arc::new(self.config),
         };
 
-        let mut router = Router::new()
+        let router = Router::new()
             .route("/", get(root_handler))
-            .route("/proxy/*jrg_url", get(proxy_jrg_handler).post(proxy_jrg_handler))
-            .route("/{*path}", get(path_handler).post(path_handler));
-
-        if state.config.enable_http_bridge {
-            router = router.route("/http/*url", get(http_bridge_handler));
-        }
+            .fallback(get(catch_all_handler).post(catch_all_handler));
 
         let listen_addr = state.config.listen_addr.clone();
         let jrg_host = state.config.jrg_host.clone();
@@ -166,42 +161,52 @@ async fn root_handler(State(state): State<AppState>) -> Html<String> {
     ))
 }
 
-/// Explicit proxy handler: fetch a JRG URL and return as HTML.
-async fn proxy_jrg_handler(
+/// Catch-all handler: routes to proxy, bridge, or implicit path proxy.
+async fn catch_all_handler(
     State(state): State<AppState>,
-    Path(jrg_url): Path<String>,
+    uri: axum::http::Uri,
     method: Method,
     query: Query<HashMap<String, String>>,
     body: String,
 ) -> Response {
-    let jrg_url = format!("jrg://{}", jrg_url.trim_start_matches('/'));
-    let result = fetch_via_jrg(&jrg_url, &method, &query, &body, &state.config).await;
-    match result {
-        Ok(html) => Html(html).into_response(),
-        Err(e) => {
-            let status = match &e {
-                GatewayError::Config(_) => HttpStatus::BAD_REQUEST,
-                _ => HttpStatus::BAD_GATEWAY,
-            };
-            (status, format!("Gateway error: {e}")).into_response()
-        }
-    }
-}
+    // Get the path from the URI
+    let path = uri.path().trim_start_matches('/');
 
-/// Path handler: map any path to the configured JRG host.
-async fn path_handler(
-    State(state): State<AppState>,
-    Path(path): Path<String>,
-    method: Method,
-    query: Query<HashMap<String, String>>,
-    body: String,
-) -> Response {
-    let jrg_url = match HttpToJrgGateway::build_jrg_url(&path, &state.config) {
+    // HTTP bridge: /http/*url
+    if path.starts_with("http/") {
+        if !state.config.enable_http_bridge {
+            return (HttpStatus::NOT_FOUND, "HTTP bridge is disabled").into_response();
+        }
+        return http_bridge_inner(path.strip_prefix("http/").unwrap_or(""), &state).await;
+    }
+
+    // Explicit proxy: /proxy/jrg://... 
+    if let Some(jrg_url) = path.strip_prefix("proxy/jrg://") {
+        let jrg_url = format!("jrg://{jrg_url}");
+        return fetch_via_jrg_and_respond(&jrg_url, &method, &query, &body, &state.config).await;
+    }
+    if path.starts_with("proxy/") {
+        let jrg_url = format!("jrg://{}", path.strip_prefix("proxy/").unwrap_or(""));
+        return fetch_via_jrg_and_respond(&jrg_url, &method, &query, &body, &state.config).await;
+    }
+
+    // Implicit: map path to configured JRG host
+    let jrg_url = match HttpToJrgGateway::build_jrg_url(path, &state.config) {
         Ok(url) => url,
         Err(e) => return (HttpStatus::BAD_REQUEST, format!("Invalid path: {e}")).into_response(),
     };
-    let result = fetch_via_jrg(&jrg_url, &method, &query, &body, &state.config).await;
-    match result {
+    fetch_via_jrg_and_respond(&jrg_url, &method, &query, &body, &state.config).await
+}
+
+/// Fetch a JRG URL and return HTML response.
+async fn fetch_via_jrg_and_respond(
+    jrg_url: &str,
+    http_method: &Method,
+    query: &HashMap<String, String>,
+    body: &str,
+    config: &HttpToJrgGatewayConfig,
+) -> Response {
+    match fetch_via_jrg(jrg_url, http_method, query, body, config).await {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
             let status = match &e {
@@ -214,15 +219,14 @@ async fn path_handler(
 }
 
 /// HTTP bridge: fetch an HTTP(S) URL and return as JRG HTML.
-async fn http_bridge_handler(
-    State(state): State<AppState>,
-    Path(http_url): Path<String>,
+async fn http_bridge_inner(
+    http_path: &str,
+    state: &AppState,
 ) -> Response {
-    let http_url = http_url.trim_start_matches('/');
-    let resolved = if !http_url.starts_with("http://") && !http_url.starts_with("https://") {
-        format!("https://{http_url}")
+    let resolved = if !http_path.starts_with("http://") && !http_path.starts_with("https://") {
+        format!("https://{http_path}")
     } else {
-        http_url.to_string()
+        http_path.to_string()
     };
 
     let client = reqwest::Client::builder()
