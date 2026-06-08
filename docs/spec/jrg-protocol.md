@@ -117,7 +117,25 @@ Request {
 }
 ```
 
-Supported request methods are `GET` and `POST`. `POST` bodies use URL-encoded form payloads in the prototype. Future network transports can add agent hints, accepted render capabilities, cache validators, encryption, and authentication without changing page syntax.
+Supported request methods are `GET` and `POST`. `POST` bodies use URL-encoded form payloads in the prototype. Future network transports can add agent hints, accepted render capabilities, authentication, and richer encrypted handshakes without changing page syntax.
+
+## Encryption capabilities
+
+Jaringan keeps encryption under the same `jrg://` scheme. The prototype protocol crate provides reusable encryption primitives and compact capability metadata; the TCP transport still runs as a simple plaintext development transport until a handshake/framing layer is added.
+
+The first supported encryption suite is:
+
+```text
+xchacha20poly1305
+```
+
+Capability header values use this shape:
+
+```text
+xchacha20poly1305; key-id=key-2026
+```
+
+Encrypted payloads carry a suite, base64 nonce, and base64 ciphertext. XChaCha20-Poly1305 provides authenticated encryption and accepts associated data so callers can bind ciphertext to context such as the canonical `jrg://` URL.
 
 ## Security indicators and signatures
 
@@ -207,5 +225,5 @@ The prototype local resolver also includes one demo action endpoint for M4 exper
 ## Not in 0.1
 
 - No redirect safety UI yet; the prototype browser and `get --follow` follow redirects automatically.
-- No content negotiation beyond basic content type enums.
-- No encrypted transport yet.
+- No content negotiation beyond basic content type enums and encryption capability values.
+- No encrypted TCP handshake/framing yet.

@@ -6,6 +6,11 @@ use std::{
     time::Duration,
 };
 
+use base64::Engine;
+use chacha20poly1305::{
+    XChaCha20Poly1305, XNonce,
+    aead::{Aead, KeyInit},
+};
 use thiserror::Error;
 use url::Url;
 
@@ -178,6 +183,162 @@ impl Response {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResponseTag {
     Redirect { target: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncryptionSuite {
+    XChaCha20Poly1305,
+}
+
+impl EncryptionSuite {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::XChaCha20Poly1305 => "xchacha20poly1305",
+        }
+    }
+
+    pub fn parse(input: &str) -> Option<Self> {
+        match input.trim().to_ascii_lowercase().as_str() {
+            "xchacha20poly1305" => Some(Self::XChaCha20Poly1305),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncryptionCapability {
+    pub suite: EncryptionSuite,
+    pub key_id: String,
+}
+
+impl EncryptionCapability {
+    pub fn xchacha20_poly1305(key_id: impl Into<String>) -> Self {
+        Self {
+            suite: EncryptionSuite::XChaCha20Poly1305,
+            key_id: key_id.into(),
+        }
+    }
+
+    pub fn to_header_value(&self) -> String {
+        format!("{}; key-id={}", self.suite.as_str(), self.key_id)
+    }
+
+    pub fn from_header_value(input: &str) -> Result<Self, EncryptionError> {
+        let mut parts = input.split(';').map(str::trim);
+        let suite = parts
+            .next()
+            .and_then(EncryptionSuite::parse)
+            .ok_or(EncryptionError::BadCapability)?;
+        let mut key_id = None;
+        for part in parts {
+            if let Some(value) = part.strip_prefix("key-id=") {
+                key_id = Some(value.trim().to_owned());
+            }
+        }
+        let key_id = key_id
+            .filter(|value| !value.is_empty())
+            .ok_or(EncryptionError::BadCapability)?;
+        Ok(Self { suite, key_id })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncryptionKey([u8; 32]);
+
+impl EncryptionKey {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncryptionNonce([u8; 24]);
+
+impl EncryptionNonce {
+    pub fn from_bytes(bytes: [u8; 24]) -> Self {
+        Self(bytes)
+    }
+
+    fn as_bytes(&self) -> &[u8; 24] {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncryptedPayload {
+    pub suite: EncryptionSuite,
+    pub nonce_base64: String,
+    pub ciphertext_base64: String,
+}
+
+pub fn encrypt_payload(
+    key: &EncryptionKey,
+    nonce: EncryptionNonce,
+    plaintext: &[u8],
+    associated_data: &[u8],
+) -> Result<EncryptedPayload, EncryptionError> {
+    let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
+    let ciphertext = cipher
+        .encrypt(
+            XNonce::from_slice(nonce.as_bytes()),
+            chacha20poly1305::aead::Payload {
+                msg: plaintext,
+                aad: associated_data,
+            },
+        )
+        .map_err(|_| EncryptionError::Encrypt)?;
+    Ok(EncryptedPayload {
+        suite: EncryptionSuite::XChaCha20Poly1305,
+        nonce_base64: base64::engine::general_purpose::STANDARD.encode(nonce.as_bytes()),
+        ciphertext_base64: base64::engine::general_purpose::STANDARD.encode(ciphertext),
+    })
+}
+
+pub fn decrypt_payload(
+    key: &EncryptionKey,
+    payload: &EncryptedPayload,
+    associated_data: &[u8],
+) -> Result<Vec<u8>, EncryptionError> {
+    if payload.suite != EncryptionSuite::XChaCha20Poly1305 {
+        return Err(EncryptionError::UnsupportedSuite);
+    }
+    let nonce = base64::engine::general_purpose::STANDARD
+        .decode(&payload.nonce_base64)
+        .map_err(|_| EncryptionError::BadNonce)?;
+    let nonce: [u8; 24] = nonce.try_into().map_err(|_| EncryptionError::BadNonce)?;
+    let ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(&payload.ciphertext_base64)
+        .map_err(|_| EncryptionError::BadCiphertext)?;
+    let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
+    cipher
+        .decrypt(
+            XNonce::from_slice(&nonce),
+            chacha20poly1305::aead::Payload {
+                msg: &ciphertext,
+                aad: associated_data,
+            },
+        )
+        .map_err(|_| EncryptionError::Decrypt)
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum EncryptionError {
+    #[error("bad encryption capability")]
+    BadCapability,
+    #[error("unsupported encryption suite")]
+    UnsupportedSuite,
+    #[error("bad encryption nonce")]
+    BadNonce,
+    #[error("bad ciphertext")]
+    BadCiphertext,
+    #[error("encryption failed")]
+    Encrypt,
+    #[error("decryption failed")]
+    Decrypt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -727,6 +888,35 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_millis(500));
         assert!(
             matches!(error, WireError::Io(error) if error.kind() == io::ErrorKind::WouldBlock || error.kind() == io::ErrorKind::TimedOut)
+        );
+    }
+
+    #[test]
+    fn encrypted_payload_round_trips_with_xchacha20_poly1305() {
+        let key = EncryptionKey::from_bytes([3; 32]);
+        let nonce = EncryptionNonce::from_bytes([4; 24]);
+        let payload =
+            encrypt_payload(&key, nonce, b"# Secret page\n", b"jrg://example.org/").unwrap();
+
+        assert_eq!(payload.suite, EncryptionSuite::XChaCha20Poly1305);
+        assert_ne!(payload.ciphertext_base64, "# Secret page\n");
+        assert_eq!(
+            decrypt_payload(&key, &payload, b"jrg://example.org/").unwrap(),
+            b"# Secret page\n"
+        );
+    }
+
+    #[test]
+    fn encryption_capabilities_serialize_to_headers() {
+        let capability = EncryptionCapability::xchacha20_poly1305("key-2026");
+
+        assert_eq!(
+            capability.to_header_value(),
+            "xchacha20poly1305; key-id=key-2026"
+        );
+        assert_eq!(
+            EncryptionCapability::from_header_value("xchacha20poly1305; key-id=key-2026").unwrap(),
+            capability
         );
     }
 
