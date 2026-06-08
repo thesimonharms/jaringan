@@ -138,6 +138,34 @@ impl PublicKeyring {
         Ok(())
     }
 
+    pub fn from_text(source: &str) -> Result<Self, String> {
+        let mut keyring = Self::default();
+        for (index, raw_line) in source.lines().enumerate() {
+            let line_number = index + 1;
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let parts = line.split_whitespace().collect::<Vec<_>>();
+            if parts.len() != 2 {
+                return Err(format!(
+                    "line {line_number}: expected `<signer> ed25519:<base64-public-key>`"
+                ));
+            }
+            let (signer, key) = (parts[0], parts[1]);
+            let Some(key_base64) = key.strip_prefix("ed25519:") else {
+                return Err(format!(
+                    "line {line_number}: expected `<signer> ed25519:<base64-public-key>`"
+                ));
+            };
+            keyring
+                .add_ed25519_key(signer, key_base64)
+                .map_err(|error| format!("line {line_number}: {error}"))?;
+        }
+        Ok(keyring)
+    }
+
     fn ed25519_key(&self, signer: &str) -> Option<&VerifyingKey> {
         self.ed25519_keys.get(signer)
     }
@@ -1052,5 +1080,43 @@ mod tests {
                 signer: "alice".into()
             }
         );
+    }
+
+    #[test]
+    fn keyring_text_parses_human_editable_ed25519_keys() {
+        use base64::Engine;
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let signing_key = SigningKey::from_bytes(&[9; 32]);
+        let public_key = base64::engine::general_purpose::STANDARD
+            .encode(signing_key.verifying_key().to_bytes());
+        let keyring = PublicKeyring::from_text(&format!(
+            "# trusted signers\n\nalice ed25519:{public_key}\n"
+        ))
+        .unwrap();
+        let unsigned =
+            "# Signed page\n\nLoaded through a keyring file.\n\n~~~~~\nsigned-by: alice\n";
+        let signature = signing_key.sign(canonical_signature_payload(unsigned).as_bytes());
+        let source = format!(
+            "{unsigned}signature: ed25519:{}\n",
+            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+        );
+
+        assert_eq!(
+            verify_source_signature(&source, &keyring),
+            SignatureStatus::Secure {
+                signer: "alice".into()
+            }
+        );
+    }
+
+    #[test]
+    fn keyring_text_rejects_malformed_lines_with_line_numbers() {
+        let valid_empty_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let error = PublicKeyring::from_text(&format!("alice ed25519:{valid_empty_key}\nbroken\n"))
+            .unwrap_err();
+
+        assert!(error.contains("line 2"));
+        assert!(error.contains("expected `<signer> ed25519:<base64-public-key>`"));
     }
 }

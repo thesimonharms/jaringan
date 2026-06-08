@@ -36,13 +36,21 @@ Current browser states:
 
 ## Keyrings
 
-The initial implementation has a `PublicKeyring` model with Ed25519 public keys. CLI configuration/loading is intentionally still minimal; the browser currently uses an empty default keyring, so signed pages from unknown signers show as not secure until keyring loading is wired in.
+The browser loads a user keyring from:
 
-Future keyring file format should stay human-editable, for example:
+```text
+~/.config/jaringan/keyring
+```
+
+Set `JARINGAN_KEYRING=/path/to/keyring` to use a different file.
+
+The keyring is human-editable. Blank lines and `#` comments are ignored. Each trusted signer uses one line:
 
 ```text
 alice ed25519:<base64-public-key>
 ```
+
+Malformed keyring files do not block browsing; the browser prints a warning and continues with an empty keyring, so affected signed pages show as unknown signers instead of secure.
 
 ## Non-goals
 

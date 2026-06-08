@@ -63,6 +63,15 @@ cargo run -p jaringan-browser -- open docs/examples/search-form.jrg
 
 Use `sample` for plain-text output, `fetch` for local protocol-path resolution, `serve`/`get` for TCP transport, `get --follow` for non-interactive redirect following, `index`/`search` for local M5 crawl/search experiments, and `open` for the interactive ratatui browser over local files or TCP `jrg://` pages. `index --output` persists a reusable `.jrgidx` search index, and `search --index` queries that index instead of crawling. M4/M5 form syntax uses `? name ...` inputs and `! id ...` buttons. Inputs can be edited in the browser; confirmed POST actions submit URL-encoded values, and local GET `/search` actions render selectable search results in the TUI.
 
+For signed pages, put trusted Ed25519 public keys in `~/.config/jaringan/keyring`:
+
+```text
+# signer-name ed25519:<base64-public-key>
+alice ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+```
+
+Set `JARINGAN_KEYRING=/path/to/keyring` to point the browser at another keyring file.
+
 Specs:
 
 - `docs/spec/jrg-page-format.md`

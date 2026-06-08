@@ -651,14 +651,15 @@ fn download_remote_image(url: &str) -> String {
 }
 
 fn load_location(location: &PageLocation) -> anyhow::Result<LoadedPage> {
+    let keyring = default_keyring();
     match location {
-        PageLocation::File(path) => load_file_page(path),
-        PageLocation::Network(url) => load_network_page(url),
+        PageLocation::File(path) => load_file_page_with_keyring(path, &keyring),
+        PageLocation::Network(url) => load_network_page_with_keyring(url, &keyring),
         PageLocation::Unsupported(target) => bail!("unsupported target: {target}"),
     }
 }
 
-fn load_file_page(path: &Path) -> anyhow::Result<LoadedPage> {
+fn load_file_page_with_keyring(path: &Path, keyring: &PublicKeyring) -> anyhow::Result<LoadedPage> {
     if path.extension().and_then(|ext| ext.to_str()) != Some("jrg") {
         bail!(
             "Jaringan pages must use the .jrg extension: {}",
@@ -672,7 +673,7 @@ fn load_file_page(path: &Path) -> anyhow::Result<LoadedPage> {
     let document =
         parse_document(&source).with_context(|| format!("failed to parse {}", path.display()))?;
     let items = collect_items(&document);
-    let signature_status = verify_source_signature(&source, &default_keyring());
+    let signature_status = verify_source_signature(&source, keyring);
 
     Ok(LoadedPage {
         location: PageLocation::File(path),
@@ -682,7 +683,10 @@ fn load_file_page(path: &Path) -> anyhow::Result<LoadedPage> {
     })
 }
 
-fn load_network_page(url: &JaringanUrl) -> anyhow::Result<LoadedPage> {
+fn load_network_page_with_keyring(
+    url: &JaringanUrl,
+    keyring: &PublicKeyring,
+) -> anyhow::Result<LoadedPage> {
     const MAX_REDIRECTS: usize = 5;
 
     let mut current = url.clone();
@@ -725,7 +729,7 @@ fn load_network_page(url: &JaringanUrl) -> anyhow::Result<LoadedPage> {
             location: PageLocation::Network(current),
             document,
             items,
-            signature_status: verify_source_signature(&response.body, &default_keyring()),
+            signature_status: verify_source_signature(&response.body, keyring),
         });
     }
 
@@ -791,7 +795,39 @@ fn location_label(location: &PageLocation) -> String {
 }
 
 fn default_keyring() -> PublicKeyring {
-    PublicKeyring::default()
+    let path = default_keyring_path();
+    if !path.exists() {
+        return PublicKeyring::default();
+    }
+
+    match load_keyring_file(&path) {
+        Ok(keyring) => keyring,
+        Err(error) => {
+            eprintln!(
+                "warning: failed to load keyring {}: {error}",
+                path.display()
+            );
+            PublicKeyring::default()
+        }
+    }
+}
+
+fn default_keyring_path() -> PathBuf {
+    std::env::var_os("JARINGAN_KEYRING")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join(".config/jaringan/keyring"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".config/jaringan/keyring"))
+}
+
+fn load_keyring_file(path: &Path) -> anyhow::Result<PublicKeyring> {
+    let source = fs::read_to_string(path)
+        .with_context(|| format!("failed to read keyring {}", path.display()))?;
+    PublicKeyring::from_text(&source)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| format!("failed to parse keyring {}", path.display()))
 }
 
 fn security_label(status: &SignatureStatus) -> String {
@@ -1062,9 +1098,11 @@ mod tests {
             jaringan_protocol::serve_one(listener, resolver).unwrap();
         });
 
-        let loaded =
-            load_network_page(&JaringanUrl::parse(&format!("jrg://{addr}/old.jrg")).unwrap())
-                .unwrap();
+        let loaded = load_network_page_with_keyring(
+            &JaringanUrl::parse(&format!("jrg://{addr}/old.jrg")).unwrap(),
+            &PublicKeyring::default(),
+        )
+        .unwrap();
         server.join().unwrap();
 
         assert_eq!(
@@ -1076,9 +1114,11 @@ mod tests {
 
     #[test]
     fn network_loader_returns_error_page_when_fetch_fails() {
-        let loaded =
-            load_network_page(&JaringanUrl::parse("jrg://127.0.0.1:1/missing.jrg").unwrap())
-                .unwrap();
+        let loaded = load_network_page_with_keyring(
+            &JaringanUrl::parse("jrg://127.0.0.1:1/missing.jrg").unwrap(),
+            &PublicKeyring::default(),
+        )
+        .unwrap();
         let lines = render_plain(&loaded.document);
 
         assert!(lines.contains("Network error"));
@@ -1269,5 +1309,45 @@ mod tests {
             }),
             "secure: signed by alice"
         );
+    }
+
+    #[test]
+    fn file_loader_verifies_signed_pages_against_loaded_keyring() {
+        use base64::Engine;
+        use ed25519_dalek::{Signer, SigningKey};
+        use jaringan_core::canonical_signature_payload;
+
+        let root = std::env::temp_dir().join(format!(
+            "jaringan-keyring-loader-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let signing_key = SigningKey::from_bytes(&[11; 32]);
+        let public_key = base64::engine::general_purpose::STANDARD
+            .encode(signing_key.verifying_key().to_bytes());
+        let keyring_path = root.join("keyring");
+        fs::write(&keyring_path, format!("alice ed25519:{public_key}\n")).unwrap();
+
+        let unsigned = "# Signed local page\n\nTrusted from disk.\n\n~~~~~\nsigned-by: alice\n";
+        let signature = signing_key.sign(canonical_signature_payload(unsigned).as_bytes());
+        let source = format!(
+            "{unsigned}signature: ed25519:{}\n",
+            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+        );
+        let page_path = root.join("signed.jrg");
+        fs::write(&page_path, source).unwrap();
+
+        let keyring = load_keyring_file(&keyring_path).unwrap();
+        let page = load_file_page_with_keyring(&page_path, &keyring).unwrap();
+
+        assert_eq!(
+            page.signature_status,
+            SignatureStatus::Secure {
+                signer: "alice".into()
+            }
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

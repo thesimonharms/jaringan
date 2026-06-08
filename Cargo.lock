@@ -619,8 +619,10 @@ name = "jaringan-browser"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "crossterm",
+ "ed25519-dalek",
  "jaringan-core",
  "jaringan-protocol",
  "jaringan-render",

@@ -99,4 +99,4 @@ Application shell:
 4. **M3 protocol server/client:** serve, fetch, browse `jrg://` pages over TCP, follow redirect tags in the browser/CLI, display network error pages, and use bounded client timeouts, then harden toward TLS/discovery.
 5. **M4 actions/forms:** structured/editable inputs, action buttons with explicit two-step confirmation, URL-encoded payload collection, TCP POST action submission, and a local demo action handler.
 6. **M5 crawler/search:** index page titles, headings, links, metadata, and body text; crawl local `.jrg` roots, query/persist the resulting search index, and expose local TUI search result pages.
-7. **M6 security indicators:** keep `jrg://` as one secure-capable scheme, verify optional Ed25519 page signatures against public keyrings, and display secure/not-secure state without gatekeeping unsigned pages.
+7. **M6 security indicators:** keep `jrg://` as one secure-capable scheme, load human-editable Ed25519 public keyrings, verify optional page signatures against trusted keys, and display secure/not-secure state without gatekeeping unsigned pages.

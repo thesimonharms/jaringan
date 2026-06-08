@@ -14,3 +14,7 @@ jaringan-core.workspace = true
 jaringan-protocol.workspace = true
 jaringan-render.workspace = true
 ratatui.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+ed25519-dalek.workspace = true
