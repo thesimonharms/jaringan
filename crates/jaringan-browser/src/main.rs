@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     io::{self, Stdout},
     net::TcpListener,
     path::{Path, PathBuf},
@@ -23,8 +23,9 @@ use jaringan_core::{
     SignatureStatus, parse_document, verify_source_signature,
 };
 use jaringan_protocol::{
-    ContentType, JaringanUrl, LocalFileResolver, PageResolver, Request, Response, ResponseTag,
-    StatusCode, fetch_tcp, post_tcp, serve,
+    ContentType, EncryptedTcpConfig, EncryptionKey, JaringanUrl, LocalFileResolver, PageResolver,
+    Request, Response, ResponseTag, StatusCode, fetch_tcp, fetch_tcp_encrypted, post_tcp, serve,
+    serve_encrypted,
 };
 use jaringan_render::render_plain;
 use ratatui::{
@@ -56,12 +57,18 @@ enum Command {
         /// Follow Tag-Redirect responses before printing the final response.
         #[arg(long)]
         follow: bool,
+        /// Use encrypted TCP with this key id and JARINGAN_ENCRYPTION_KEY_HEX.
+        #[arg(long)]
+        encrypted_key_id: Option<String>,
     },
     /// Serve a local document root over the TCP wire protocol.
     Serve {
         root: PathBuf,
         #[arg(long, default_value = "127.0.0.1:7070")]
         bind: String,
+        /// Require encrypted TCP with this key id and JARINGAN_ENCRYPTION_KEY_HEX.
+        #[arg(long)]
+        encrypted_key_id: Option<String>,
     },
     /// Print a local search index of all .jrg pages under a root.
     Index {
@@ -130,20 +137,41 @@ fn main() -> anyhow::Result<()> {
             let response = resolver.fetch(&Request::new(url))?;
             print_response(response);
         }
-        Command::Get { url, follow } => {
+        Command::Get {
+            url,
+            follow,
+            encrypted_key_id,
+        } => {
             let url = JaringanUrl::parse(&url)?;
+            let encrypted_config = encrypted_key_id
+                .as_deref()
+                .map(encrypted_tcp_config_from_env)
+                .transpose()?;
             let response = if follow {
-                fetch_response_following_redirects(url)?.1
+                fetch_response_following_redirects_with_encryption(url, encrypted_config.as_ref())?
+                    .1
+            } else if let Some(config) = encrypted_config.as_ref() {
+                fetch_tcp_encrypted(&url, config)?
             } else {
                 fetch_tcp(&url)?
             };
             print_response(response);
         }
-        Command::Serve { root, bind } => {
+        Command::Serve {
+            root,
+            bind,
+            encrypted_key_id,
+        } => {
             let listener = TcpListener::bind(&bind)
                 .with_context(|| format!("failed to bind Jaringan server to {bind}"))?;
-            eprintln!("serving {} at jrg://{bind}/", root.display());
-            serve(listener, LocalFileResolver::new(root))?;
+            if let Some(key_id) = encrypted_key_id {
+                let config = encrypted_tcp_config_from_env(&key_id)?;
+                eprintln!("serving encrypted {} at jrg://{bind}/", root.display());
+                serve_encrypted(listener, LocalFileResolver::new(root), &config)?;
+            } else {
+                eprintln!("serving {} at jrg://{bind}/", root.display());
+                serve(listener, LocalFileResolver::new(root))?;
+            }
         }
         Command::Index { root, output } => {
             let index = build_local_search_index(&root)?;
@@ -251,13 +279,18 @@ fn jrg_url_for_path(root: &Path, path: &Path) -> String {
     format!("jrg://local/{relative}")
 }
 
-fn fetch_response_following_redirects(
+fn fetch_response_following_redirects_with_encryption(
     mut url: JaringanUrl,
+    encrypted_config: Option<&EncryptedTcpConfig>,
 ) -> anyhow::Result<(JaringanUrl, Response)> {
     const MAX_REDIRECTS: usize = 5;
 
     for redirect_count in 0..=MAX_REDIRECTS {
-        let response = fetch_tcp(&url)?;
+        let response = if let Some(config) = encrypted_config {
+            fetch_tcp_encrypted(&url, config)?
+        } else {
+            fetch_tcp(&url)?
+        };
         let Some(target) = redirect_target(&response) else {
             return Ok((url, response));
         };
@@ -271,6 +304,30 @@ fn fetch_response_following_redirects(
     }
 
     unreachable!("redirect loop exits by returning once MAX_REDIRECTS is reached")
+}
+
+fn encrypted_tcp_config_from_env(key_id: &str) -> anyhow::Result<EncryptedTcpConfig> {
+    let key_hex = env::var("JARINGAN_ENCRYPTION_KEY_HEX")
+        .context("JARINGAN_ENCRYPTION_KEY_HEX is required for encrypted TCP")?;
+    Ok(EncryptedTcpConfig::new(
+        key_id.to_owned(),
+        EncryptionKey::from_bytes(parse_32_byte_hex_key(&key_hex)?),
+    ))
+}
+
+fn parse_32_byte_hex_key(input: &str) -> anyhow::Result<[u8; 32]> {
+    let trimmed = input.trim();
+    if trimmed.len() != 64 {
+        bail!("JARINGAN_ENCRYPTION_KEY_HEX must be exactly 64 hex characters");
+    }
+
+    let mut bytes = [0; 32];
+    for (index, chunk) in trimmed.as_bytes().chunks_exact(2).enumerate() {
+        let hex = std::str::from_utf8(chunk).context("encryption key contains invalid UTF-8")?;
+        bytes[index] = u8::from_str_radix(hex, 16)
+            .with_context(|| format!("invalid hex byte `{hex}` in JARINGAN_ENCRYPTION_KEY_HEX"))?;
+    }
+    Ok(bytes)
 }
 
 fn run_tui(target: String) -> anyhow::Result<()> {
@@ -1135,8 +1192,9 @@ mod tests {
             jaringan_protocol::serve_one(listener, resolver).unwrap();
         });
 
-        let (final_url, response) = fetch_response_following_redirects(
+        let (final_url, response) = fetch_response_following_redirects_with_encryption(
             JaringanUrl::parse(&format!("jrg://{addr}/old.jrg")).unwrap(),
+            None,
         )
         .unwrap();
         server.join().unwrap();

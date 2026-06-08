@@ -18,7 +18,7 @@ The current web is optimized for graphical browsers. AI browser-use workflows ha
    - Query strings and fragments are supported.
    - `/foo.jrg` is a document, `/foo/` is a folder index, and `/foo` deliberately does not resolve.
    - `jrg://` is the single secure-capable scheme: signed pages use public keyrings, encrypted payload capabilities live under the protocol layer, and browsers show secure/not secure instead of inventing a second scheme.
-   - The first TCP transport is a tiny text protocol for local experimentation before encrypted transport/discovery.
+   - The first TCP transport is a tiny text protocol for local experimentation, with optional encrypted framing for pre-shared-key deployments.
 
 2. **Rendering protocol (`jaringan-core` + `jaringan-render`)**
    - Pages are structured blocks: headings, paragraphs, links, structured inputs, action buttons, images, preformatted blocks, and trailing metadata after `~~~~~`.
@@ -52,6 +52,8 @@ cargo run -p jaringan-browser -- fetch docs/examples 'jrg://local/protocol.jrg?v
 cargo run -p jaringan-browser -- serve docs/examples --bind 127.0.0.1:7070
 cargo run -p jaringan-browser -- get jrg://127.0.0.1:7070/
 cargo run -p jaringan-browser -- get --follow jrg://127.0.0.1:7070/
+JARINGAN_ENCRYPTION_KEY_HEX=0000000000000000000000000000000000000000000000000000000000000000 cargo run -p jaringan-browser -- serve docs/examples --bind 127.0.0.1:7070 --encrypted-key-id local-dev
+JARINGAN_ENCRYPTION_KEY_HEX=0000000000000000000000000000000000000000000000000000000000000000 cargo run -p jaringan-browser -- get --encrypted-key-id local-dev jrg://127.0.0.1:7070/
 cargo run -p jaringan-browser -- index docs/examples
 cargo run -p jaringan-browser -- index docs/examples --output /tmp/docs.jrgidx
 cargo run -p jaringan-browser -- search docs/examples action
@@ -61,7 +63,7 @@ cargo run -p jaringan-browser -- open docs/examples/hello.jrg
 cargo run -p jaringan-browser -- open docs/examples/search-form.jrg
 ```
 
-Use `sample` for plain-text output, `fetch` for local protocol-path resolution, `serve`/`get` for TCP transport, `get --follow` for non-interactive redirect following, `index`/`search` for local M5 crawl/search experiments, and `open` for the interactive ratatui browser over local files or TCP `jrg://` pages. `index --output` persists a reusable `.jrgidx` search index, and `search --index` queries that index instead of crawling. M4/M5 form syntax uses `? name ...` inputs and `! id ...` buttons. Inputs can be edited in the browser; confirmed POST actions submit URL-encoded values, and local GET `/search` actions render selectable search results in the TUI.
+Use `sample` for plain-text output, `fetch` for local protocol-path resolution, `serve`/`get` for TCP transport, `get --follow` for non-interactive redirect following, `--encrypted-key-id` plus `JARINGAN_ENCRYPTION_KEY_HEX` for encrypted TCP framing, `index`/`search` for local M5 crawl/search experiments, and `open` for the interactive ratatui browser over local files or TCP `jrg://` pages. `index --output` persists a reusable `.jrgidx` search index, and `search --index` queries that index instead of crawling. M4/M5 form syntax uses `? name ...` inputs and `! id ...` buttons. Inputs can be edited in the browser; confirmed POST actions submit URL-encoded values, and local GET `/search` actions render selectable search results in the TUI.
 
 For signed pages, put trusted Ed25519 public keys in `~/.config/jaringan/keyring`:
 

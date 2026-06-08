@@ -59,6 +59,7 @@ Owns transport-facing types:
 - `ResponseTag` redirect tags
 - `PageResolver` and `LocalFileResolver`
 - TCP `serve`/`fetch_tcp` transport helpers
+- encrypted TCP `serve_encrypted`/`fetch_tcp_encrypted` helpers using pre-shared-key frames
 - XChaCha20-Poly1305 encrypted payload helpers and encryption capability metadata
 
 ### `jaringan-render`
@@ -75,7 +76,7 @@ Application shell:
 - CLI arguments
 - sample rendering command
 - local protocol fetch command
-- TCP protocol serve/get commands
+- TCP protocol serve/get commands, including optional encrypted pre-shared-key TCP mode
 - modal ratatui event loop for local files and TCP `jrg://` URLs
 - browser-side redirect following and network error pages
 - bounded TCP client timeouts and `get --follow`
@@ -90,7 +91,7 @@ Application shell:
 - `docs/spec/jrg-page-format.md`: `.jrg` block grammar, metadata delimiter, plain-text fallback rules.
 - `docs/spec/jrg-protocol.md`: `jrg://` URL semantics, strict `.jrg` path rules, status codes, response tags, local resolver behavior, TCP wire format, and encryption capability values.
 - `docs/spec/jrg-security.md`: same-scheme security model, public-keyring signatures, browser indicators.
-- `docs/spec/jrg-encryption.md`: XChaCha20-Poly1305 encrypted payload model and capability metadata.
+- `docs/spec/jrg-encryption.md`: XChaCha20-Poly1305 encrypted payload model, capability metadata, and encrypted TCP frame shape.
 - `docs/spec/jrg-search.md`: M5 local indexing fields, ranking weights, and prototype CLI output.
 
 ## Milestones
@@ -102,4 +103,4 @@ Application shell:
 5. **M4 actions/forms:** structured/editable inputs, action buttons with explicit two-step confirmation, URL-encoded payload collection, TCP POST action submission, and a local demo action handler.
 6. **M5 crawler/search:** index page titles, headings, links, metadata, and body text; crawl local `.jrg` roots, query/persist the resulting search index, and expose local TUI search result pages.
 7. **M6 security indicators:** keep `jrg://` as one secure-capable scheme, load human-editable Ed25519 public keyrings, verify optional page signatures against trusted keys, and display secure/not-secure state without gatekeeping unsigned pages.
-8. **M7 encryption capabilities:** keep `jrg://` as one scheme, define XChaCha20-Poly1305 encrypted payload primitives, and serialize encryption capability metadata before adding encrypted TCP handshakes/framing.
+8. **M7 encryption capabilities:** keep `jrg://` as one scheme, define XChaCha20-Poly1305 encrypted payload primitives, serialize encryption capability metadata, and support encrypted TCP request/response framing with pre-shared keys.

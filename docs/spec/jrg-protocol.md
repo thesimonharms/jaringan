@@ -1,6 +1,6 @@
 # Jaringan Protocol 0.1
 
-Jaringan's protocol exists to fetch terminal-native `.jrg` pages for both humans and AI agents. Version 0.1 defines URL semantics, status concepts, response tags, local resolver behavior, and a tiny TCP wire transport.
+Jaringan's protocol exists to fetch terminal-native `.jrg` pages for both humans and AI agents. Version 0.1 defines URL semantics, status concepts, response tags, local resolver behavior, a tiny TCP wire transport, and an optional encrypted TCP framing mode.
 
 ## URL scheme
 
@@ -121,7 +121,7 @@ Supported request methods are `GET` and `POST`. `POST` bodies use URL-encoded fo
 
 ## Encryption capabilities
 
-Jaringan keeps encryption under the same `jrg://` scheme. The prototype protocol crate provides reusable encryption primitives and compact capability metadata; the TCP transport still runs as a simple plaintext development transport until a handshake/framing layer is added.
+Jaringan keeps encryption under the same `jrg://` scheme. The protocol crate provides reusable encryption primitives, compact capability metadata, and an optional encrypted TCP frame wrapper for pre-shared-key deployments.
 
 The first supported encryption suite is:
 
@@ -136,6 +136,19 @@ xchacha20poly1305; key-id=key-2026
 ```
 
 Encrypted payloads carry a suite, base64 nonce, and base64 ciphertext. XChaCha20-Poly1305 provides authenticated encryption and accepts associated data so callers can bind ciphertext to context such as the canonical `jrg://` URL.
+
+Encrypted TCP frames wrap a normal Jaringan wire request or response:
+
+```text
+JRG-ENC/0.1
+Content-Encryption: xchacha20poly1305; key-id=local-dev
+Nonce: <base64-24-byte-nonce>
+Content-Length: <base64-ciphertext-length>
+
+<base64-ciphertext-and-auth-tag>
+```
+
+The browser CLI can serve and fetch encrypted frames when both peers share `JARINGAN_ENCRYPTION_KEY_HEX` and the same `--encrypted-key-id`.
 
 ## Security indicators and signatures
 
@@ -226,4 +239,4 @@ The prototype local resolver also includes one demo action endpoint for M4 exper
 
 - No redirect safety UI yet; the prototype browser and `get --follow` follow redirects automatically.
 - No content negotiation beyond basic content type enums and encryption capability values.
-- No encrypted TCP handshake/framing yet.
+- No automatic encryption key exchange yet; encrypted TCP currently uses pre-shared keys.

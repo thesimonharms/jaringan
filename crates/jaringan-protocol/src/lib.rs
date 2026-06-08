@@ -9,7 +9,7 @@ use std::{
 use base64::Engine;
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
-    aead::{Aead, KeyInit},
+    aead::{Aead, AeadCore, KeyInit, OsRng},
 };
 use thiserror::Error;
 use url::Url;
@@ -595,10 +595,72 @@ pub fn serve_one(listener: TcpListener, resolver: impl PageResolver) -> Result<(
     serve_stream(stream, &resolver)
 }
 
+pub fn serve_encrypted(
+    listener: TcpListener,
+    resolver: impl PageResolver,
+    config: &EncryptedTcpConfig,
+) -> Result<(), WireError> {
+    serve_encrypted_connections(listener, resolver, config, None)
+}
+
+fn serve_encrypted_connections(
+    listener: TcpListener,
+    resolver: impl PageResolver,
+    config: &EncryptedTcpConfig,
+    max_connections: Option<usize>,
+) -> Result<(), WireError> {
+    let mut handled = 0usize;
+    loop {
+        if max_connections.is_some_and(|max| handled >= max) {
+            break;
+        }
+        let (stream, _) = listener.accept()?;
+        handled += 1;
+        match serve_stream_encrypted(stream, &resolver, config) {
+            Ok(()) => {}
+            Err(
+                WireError::Encryption(_)
+                | WireError::BadEncryptedFrame
+                | WireError::BadEncryptedCapability,
+            ) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+pub fn serve_one_encrypted(
+    listener: TcpListener,
+    resolver: impl PageResolver,
+    config: &EncryptedTcpConfig,
+) -> Result<(), WireError> {
+    let (stream, _) = listener.accept()?;
+    serve_stream_encrypted(stream, &resolver, config)
+}
+
 pub fn serve_stream(mut stream: TcpStream, resolver: &impl PageResolver) -> Result<(), WireError> {
     let request = read_wire_request(&mut stream)?;
     let response = resolver.fetch(&request)?;
     write_response(&mut stream, &response)?;
+    Ok(())
+}
+
+pub fn serve_stream_encrypted(
+    mut stream: TcpStream,
+    resolver: &impl PageResolver,
+    config: &EncryptedTcpConfig,
+) -> Result<(), WireError> {
+    let plaintext = read_encrypted_frame(&mut stream, config, EncryptedFrameDirection::Request)?;
+    let request = read_wire_request_bytes(&plaintext)?;
+    let response = resolver.fetch(&request)?;
+    let mut response_bytes = Vec::new();
+    write_response(&mut response_bytes, &response)?;
+    write_encrypted_frame(
+        &mut stream,
+        config,
+        EncryptedFrameDirection::Response,
+        &response_bytes,
+    )?;
     Ok(())
 }
 
@@ -608,6 +670,48 @@ pub fn fetch_tcp(url: &JaringanUrl) -> Result<Response, WireError> {
 
 pub fn post_tcp(url: &JaringanUrl, body: String) -> Result<Response, WireError> {
     send_tcp_with_timeout(Request::post(url.clone(), body), Duration::from_secs(5))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncryptedTcpConfig {
+    pub capability: EncryptionCapability,
+    pub key: EncryptionKey,
+}
+
+impl EncryptedTcpConfig {
+    pub fn new(key_id: impl Into<String>, key: EncryptionKey) -> Self {
+        Self {
+            capability: EncryptionCapability::xchacha20_poly1305(key_id),
+            key,
+        }
+    }
+}
+
+pub fn fetch_tcp_encrypted(
+    url: &JaringanUrl,
+    config: &EncryptedTcpConfig,
+) -> Result<Response, WireError> {
+    fetch_tcp_encrypted_with_timeout(url, config, Duration::from_secs(5))
+}
+
+pub fn fetch_tcp_encrypted_with_timeout(
+    url: &JaringanUrl,
+    config: &EncryptedTcpConfig,
+    timeout: Duration,
+) -> Result<Response, WireError> {
+    send_tcp_encrypted_with_timeout(Request::new(url.clone()), config, timeout)
+}
+
+pub fn post_tcp_encrypted(
+    url: &JaringanUrl,
+    body: String,
+    config: &EncryptedTcpConfig,
+) -> Result<Response, WireError> {
+    send_tcp_encrypted_with_timeout(
+        Request::post(url.clone(), body),
+        config,
+        Duration::from_secs(5),
+    )
 }
 
 pub fn fetch_tcp_with_timeout(url: &JaringanUrl, timeout: Duration) -> Result<Response, WireError> {
@@ -620,24 +724,65 @@ fn send_tcp_with_timeout(request: Request, timeout: Duration) -> Result<Response
     let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
+    write_wire_request(&mut stream, &request)?;
+    read_response(&mut stream)
+}
+
+fn send_tcp_encrypted_with_timeout(
+    request: Request,
+    config: &EncryptedTcpConfig,
+    timeout: Duration,
+) -> Result<Response, WireError> {
+    let mut addrs = (request.url.host(), request.url.port_or_default()).to_socket_addrs()?;
+    let addr = addrs.next().ok_or(WireError::BadAddress)?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    let request_bytes = wire_request_bytes(&request)?;
+    write_encrypted_frame(
+        &mut stream,
+        config,
+        EncryptedFrameDirection::Request,
+        &request_bytes,
+    )?;
+    let response_bytes =
+        read_encrypted_frame(&mut stream, config, EncryptedFrameDirection::Response)?;
+    read_response(&mut io::Cursor::new(response_bytes))
+}
+
+fn write_wire_request(writer: &mut impl Write, request: &Request) -> io::Result<()> {
     writeln!(
-        stream,
+        writer,
         "{} {} JRG/0.1",
         request.method.as_str(),
         request.url.as_str()
     )?;
-    writeln!(stream, "Host: {}", request.url.authority())?;
+    writeln!(writer, "Host: {}", request.url.authority())?;
     if !request.body.is_empty() {
-        writeln!(stream, "Content-Length: {}", request.body.len())?;
+        writeln!(writer, "Content-Length: {}", request.body.len())?;
     }
-    writeln!(stream)?;
-    write!(stream, "{}", request.body)?;
-    stream.flush()?;
-    read_response(&mut stream)
+    writeln!(writer)?;
+    write!(writer, "{}", request.body)?;
+    writer.flush()
+}
+
+fn wire_request_bytes(request: &Request) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    write_wire_request(&mut bytes, request)?;
+    Ok(bytes)
 }
 
 fn read_wire_request(stream: &mut TcpStream) -> Result<Request, WireError> {
     let mut reader = BufReader::new(stream);
+    read_wire_request_from_reader(&mut reader)
+}
+
+fn read_wire_request_bytes(bytes: &[u8]) -> Result<Request, WireError> {
+    let mut reader = BufReader::new(io::Cursor::new(bytes));
+    read_wire_request_from_reader(&mut reader)
+}
+
+fn read_wire_request_from_reader(reader: &mut impl BufRead) -> Result<Request, WireError> {
     let mut first_line = String::new();
     reader.read_line(&mut first_line)?;
     let mut parts = first_line.split_whitespace();
@@ -696,6 +841,127 @@ pub fn write_response(writer: &mut impl Write, response: &Response) -> io::Resul
     writer.flush()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncryptedFrameDirection {
+    Request,
+    Response,
+}
+
+impl EncryptedFrameDirection {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Response => "response",
+        }
+    }
+}
+
+fn encrypted_frame_aad(config: &EncryptedTcpConfig, direction: EncryptedFrameDirection) -> Vec<u8> {
+    format!(
+        "JRG-ENC/0.1 {}; {}",
+        direction.as_str(),
+        config.capability.to_header_value()
+    )
+    .into_bytes()
+}
+
+fn random_encryption_nonce() -> EncryptionNonce {
+    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let mut bytes = [0; 24];
+    bytes.copy_from_slice(&nonce);
+    EncryptionNonce::from_bytes(bytes)
+}
+
+fn write_encrypted_frame(
+    writer: &mut impl Write,
+    config: &EncryptedTcpConfig,
+    direction: EncryptedFrameDirection,
+    plaintext: &[u8],
+) -> Result<(), WireError> {
+    let payload = encrypt_payload(
+        &config.key,
+        random_encryption_nonce(),
+        plaintext,
+        &encrypted_frame_aad(config, direction),
+    )?;
+    writeln!(writer, "JRG-ENC/0.1")?;
+    writeln!(
+        writer,
+        "Content-Encryption: {}",
+        config.capability.to_header_value()
+    )?;
+    writeln!(writer, "Nonce: {}", payload.nonce_base64)?;
+    writeln!(
+        writer,
+        "Content-Length: {}",
+        payload.ciphertext_base64.len()
+    )?;
+    writeln!(writer)?;
+    write!(writer, "{}", payload.ciphertext_base64)?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn read_encrypted_frame(
+    reader: &mut impl Read,
+    config: &EncryptedTcpConfig,
+    direction: EncryptedFrameDirection,
+) -> Result<Vec<u8>, WireError> {
+    let mut reader = BufReader::new(reader);
+    let mut first_line = String::new();
+    reader.read_line(&mut first_line)?;
+    if first_line.trim_end() != "JRG-ENC/0.1" {
+        return Err(WireError::BadEncryptedFrame);
+    }
+
+    let mut capability = None;
+    let mut nonce_base64 = None;
+    let mut content_length = None;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some(value) = trimmed.strip_prefix("Content-Encryption:") {
+            capability = Some(EncryptionCapability::from_header_value(value.trim())?);
+        } else if let Some(value) = trimmed.strip_prefix("Nonce:") {
+            nonce_base64 = Some(value.trim().to_owned());
+        } else if let Some(value) = trimmed.strip_prefix("Content-Length:") {
+            content_length = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| WireError::BadEncryptedFrame)?,
+            );
+        }
+    }
+
+    let capability = capability.ok_or(WireError::BadEncryptedFrame)?;
+    if capability != config.capability {
+        return Err(WireError::BadEncryptedCapability);
+    }
+    let nonce_base64 = nonce_base64.ok_or(WireError::BadEncryptedFrame)?;
+    let content_length = content_length.ok_or(WireError::BadEncryptedFrame)?;
+    let mut ciphertext = vec![0; content_length];
+    reader.read_exact(&mut ciphertext)?;
+    let ciphertext_base64 =
+        String::from_utf8(ciphertext).map_err(|_| WireError::BadEncryptedFrame)?;
+    let payload = EncryptedPayload {
+        suite: capability.suite,
+        nonce_base64,
+        ciphertext_base64,
+    };
+    Ok(decrypt_payload(
+        &config.key,
+        &payload,
+        &encrypted_frame_aad(config, direction),
+    )?)
+}
+
 pub fn read_response(reader: &mut impl Read) -> Result<Response, WireError> {
     let mut input = String::new();
     reader.read_to_string(&mut input)?;
@@ -745,6 +1011,12 @@ pub enum WireError {
     BadRequest,
     #[error("bad Jaringan wire response")]
     BadResponse,
+    #[error("bad encrypted Jaringan frame")]
+    BadEncryptedFrame,
+    #[error("encrypted Jaringan frame does not match configured capability")]
+    BadEncryptedCapability,
+    #[error("encryption error: {0}")]
+    Encryption(#[from] EncryptionError),
     #[error("could not resolve Jaringan host")]
     BadAddress,
 }
@@ -904,6 +1176,95 @@ mod tests {
             decrypt_payload(&key, &payload, b"jrg://example.org/").unwrap(),
             b"# Secret page\n"
         );
+    }
+
+    #[test]
+    fn encrypted_tcp_fetch_round_trips_without_plaintext_on_wire() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("index.jrg"), "# Encrypted TCP Home\n").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = EncryptedTcpConfig::new("local-dev", EncryptionKey::from_bytes([42; 32]));
+        let server_config = config.clone();
+        let resolver = LocalFileResolver::new(root.path());
+        let server = std::thread::spawn(move || {
+            serve_one_encrypted(listener, resolver, &server_config).unwrap()
+        });
+
+        let response = fetch_tcp_encrypted(
+            &JaringanUrl::parse(&format!("jrg://{addr}/")).unwrap(),
+            &config,
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(response.status, StatusCode::Ok);
+        assert_eq!(response.body, "# Encrypted TCP Home\n");
+    }
+
+    #[test]
+    fn encrypted_tcp_rejects_wrong_key() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("index.jrg"), "# Secret\n").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_config =
+            EncryptedTcpConfig::new("local-dev", EncryptionKey::from_bytes([1; 32]));
+        let client_config =
+            EncryptedTcpConfig::new("local-dev", EncryptionKey::from_bytes([2; 32]));
+        let resolver = LocalFileResolver::new(root.path());
+        let server = std::thread::spawn(move || {
+            serve_one_encrypted(listener, resolver, &server_config).unwrap_err()
+        });
+
+        let error = fetch_tcp_encrypted(
+            &JaringanUrl::parse(&format!("jrg://{addr}/")).unwrap(),
+            &client_config,
+        )
+        .unwrap_err();
+        let server_error = server.join().unwrap();
+
+        assert!(matches!(
+            server_error,
+            WireError::Encryption(EncryptionError::Decrypt)
+        ));
+        assert!(matches!(
+            error,
+            WireError::Io(_) | WireError::BadResponse | WireError::BadEncryptedFrame
+        ));
+    }
+
+    #[test]
+    fn encrypted_server_keeps_serving_after_bad_client_key() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("index.jrg"), "# Still Serving\n").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_config =
+            EncryptedTcpConfig::new("local-dev", EncryptionKey::from_bytes([7; 32]));
+        let bad_client_config =
+            EncryptedTcpConfig::new("local-dev", EncryptionKey::from_bytes([8; 32]));
+        let good_client_config = server_config.clone();
+        let resolver = LocalFileResolver::new(root.path());
+        let server = std::thread::spawn(move || {
+            serve_encrypted_connections(listener, resolver, &server_config, Some(2)).unwrap()
+        });
+
+        let bad_result = fetch_tcp_encrypted(
+            &JaringanUrl::parse(&format!("jrg://{addr}/")).unwrap(),
+            &bad_client_config,
+        );
+        assert!(bad_result.is_err());
+
+        let response = fetch_tcp_encrypted(
+            &JaringanUrl::parse(&format!("jrg://{addr}/")).unwrap(),
+            &good_client_config,
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(response.status, StatusCode::Ok);
+        assert_eq!(response.body, "# Still Serving\n");
     }
 
     #[test]
