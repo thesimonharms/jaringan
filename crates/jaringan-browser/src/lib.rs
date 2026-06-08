@@ -160,6 +160,14 @@ pub enum Overlay {
     Help,
     History,
     Bookmarks,
+    Find,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindState {
+    pub query: String,
+    pub matches: Vec<usize>,   // line indices of matches
+    pub match_idx: usize,      // current match (index into matches)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +190,7 @@ pub struct BrowserState {
     pub overlay_selected: usize,
     pub history: Vec<HistoryEntry>,
     pub bookmarks: Vec<Bookmark>,
+    pub find_state: FindState,
 }
 
 impl BrowserState {
@@ -201,6 +210,11 @@ impl BrowserState {
             overlay_selected: 0,
             history,
             bookmarks,
+            find_state: FindState {
+                query: String::new(),
+                matches: Vec::new(),
+                match_idx: 0,
+            },
         }
     }
 

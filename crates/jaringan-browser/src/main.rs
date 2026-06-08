@@ -34,7 +34,7 @@ use jaringan_render::render_plain;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
     widgets::{Block as TuiBlock, Borders, Clear, Paragraph, Wrap},
@@ -171,6 +171,14 @@ enum InteractiveItem {
 enum InputEdit {
     Append(char),
     Backspace,
+}
+
+/// A single browser tab — page content, state, and file-watch mtime.
+#[derive(Debug, Clone)]
+struct Tab {
+    page: LoadedPage,
+    state: BrowserState,
+    file_mtime: Option<SystemTime>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -452,7 +460,7 @@ fn run_app(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     target: Option<String>,
 ) -> anyhow::Result<()> {
-    let (first, mut page) = match target {
+    let (first, page) = match target {
         Some(t) => {
             let loc = parse_start_location(&t)?;
             let p = load_location(&loc)?;
@@ -473,189 +481,491 @@ fn run_app(
 
     let mut state = BrowserState::new(first.clone());
     state.record_current(page.document.title().unwrap_or("Untitled"));
+    let file_mtime = file_mtime_of(&page.location);
+    let mut tabs = vec![Tab { page, state, file_mtime }];
+    let mut active_tab: usize = 0;
     let started = Instant::now();
-    let mut file_mtime: Option<SystemTime> = file_mtime_of(&page.location);
 
     loop {
-        clamp_selection(&mut state, page.items.len());
-        let frame_result = terminal.draw(|frame| draw(frame, &state, &page, started.elapsed()));
-        if let Err(e) = frame_result {
-            return Err(e.into());
+        // Clone the active tab out, work on it, put it back.
+        let mut tab = tabs[active_tab].clone();
+        clamp_selection(&mut tab.state, tab.page.items.len());
+
+        // Live reload for file-backed pages
+        if matches!(tab.page.location, PageLocation::File(ref p) if p.is_file()) {
+            check_live_reload(&mut tab.page, &mut tab.state, &mut tab.file_mtime);
         }
 
-        // Check if the current .jrg file changed on disk (live reload)
-        if matches!(page.location, PageLocation::File(ref p) if p.is_file()) {
-            check_live_reload(&mut page, &mut state, &mut file_mtime);
-        }
-
-        // Check for streaming blocks from a live JRG stream
-        if let Some(ref rx) = page.stream_rx {
+        // Streaming blocks
+        if let Some(ref rx) = tab.page.stream_rx {
             if let Ok(block) = rx.lock().unwrap().try_recv() {
                 if let Ok(new_doc) = parse_document(&block) {
                     let block_count = new_doc.blocks.len();
                     for b in new_doc.blocks {
-                        page.document.blocks.push(b);
+                        tab.page.document.blocks.push(b);
                     }
-                    page.items = collect_items(&page.document);
-                    state.status = format!("Stream update: +{block_count} blocks");
+                    tab.page.items = collect_items(&tab.page.document);
+                    tab.state.status = format!("Stream update: +{block_count} blocks");
                 }
             }
         }
 
-        if event::poll(Duration::from_millis(120))? {
-            match event::read()? {
-                Event::Key(key) => {
-                    if state.overlay.is_some() {
-                        match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('h') | KeyCode::Char('?') => {
-                                state.overlay = None;
-                                state.status = String::from("Closed");
-                            }
-                            KeyCode::Down | KeyCode::Char('j') => {
-                                let count = match state.overlay {
-                                    Some(jaringan_browser::Overlay::History) => state.history.len(),
-                                    Some(jaringan_browser::Overlay::Bookmarks) => state.bookmarks.len(),
-                                    _ => 0,
-                                };
-                                if count > 0 {
-                                    state.overlay_selected = (state.overlay_selected + 1).min(count - 1);
-                                }
-                            }
-                            KeyCode::Up | KeyCode::Char('k') => {
-                                state.overlay_selected = state.overlay_selected.saturating_sub(1);
-                            }
-                            KeyCode::Enter => {
-                                let url = match state.overlay {
-                                    Some(jaringan_browser::Overlay::History) => {
-                                        state.history.get(state.overlay_selected).map(|e| e.url.clone())
-                                    }
-                                    Some(jaringan_browser::Overlay::Bookmarks) => {
-                                        state.bookmarks.get(state.overlay_selected).map(|b| b.url.clone())
-                                    }
-                                    _ => None,
-                                };
-                                if let Some(url) = url {
-                                    state.overlay = None;
-                                    let location = parse_start_location(&url).unwrap_or_else(|_| {
-                                        PageLocation::Unsupported(url.clone())
-                                    });
-                                    if matches!(location, PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) {
-                                        state.status = format!("⠋ Loading {url}");
-                                        let loaded = load_location(&location)?;
-                                        navigate_to(&mut state, loaded.location.clone());
-                                        state.record_current(loaded.document.title().unwrap_or("Untitled"));
-                                        state.status = "Opened from history".to_string();
-                                        page = loaded;
-                                        file_mtime = file_mtime_of(&page.location);
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                        continue;
-                    }
+        // Draw the current tab (immutable borrow of tabs from the stack)
+        let frame_result = terminal.draw(|frame| {
+            draw_frame(frame, &tabs, active_tab, started.elapsed())
+        });
+        if let Err(e) = frame_result {
+            return Err(e.into());
+        }
 
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Char(ch) if is_selected_input(&page, state.selected) => {
-                            edit_selected_input(&mut state, &mut page, InputEdit::Append(ch));
-                        }
-                        KeyCode::Backspace if is_selected_input(&page, state.selected) => {
-                            edit_selected_input(&mut state, &mut page, InputEdit::Backspace);
-                        }
-                        KeyCode::Tab => toggle_mode(&mut state),
-                        KeyCode::Char('s') => switch_mode(&mut state, BrowserMode::Scroll),
-                        KeyCode::Char('v') => switch_mode(&mut state, BrowserMode::Selection),
-                        KeyCode::Char('?') | KeyCode::Char('h') => {
-                            state.overlay = None;
-                            state.status = String::from("Close overlays");
-                        }
-                        KeyCode::Char('H') => toggle_overlay(&mut state, jaringan_browser::Overlay::History),
-                        KeyCode::Char('B') => toggle_overlay(&mut state, jaringan_browser::Overlay::Bookmarks),
-                        KeyCode::Down | KeyCode::Char('j') => match state.mode {
-                            BrowserMode::Selection => selection_down(&mut state, page.items.len()),
-                            BrowserMode::Scroll => {
-                                let line_count = render_lines(&page, state.selected).len();
-                                let viewport_height = terminal.size()?.height.saturating_sub(6);
-                                scroll_down(&mut state, line_count, viewport_height);
-                            }
-                        },
-                        KeyCode::Up | KeyCode::Char('k') => match state.mode {
-                            BrowserMode::Selection => selection_up(&mut state),
-                            BrowserMode::Scroll => scroll_up(&mut state),
-                        },
-                        KeyCode::PageDown | KeyCode::Char(' ') => match state.mode {
-                            BrowserMode::Selection => selection_down(&mut state, page.items.len()),
-                            BrowserMode::Scroll => {
-                                let line_count = render_lines(&page, state.selected).len();
-                                let viewport_height = terminal.size()?.height.saturating_sub(6);
-                                scroll_page_down(&mut state, line_count, viewport_height);
-                            }
-                        },
-                        KeyCode::PageUp => match state.mode {
-                            BrowserMode::Selection => selection_up(&mut state),
-                            BrowserMode::Scroll => {
-                                let line_count = render_lines(&page, state.selected).len();
-                                let viewport_height = terminal.size()?.height.saturating_sub(6);
-                                scroll_page_up(&mut state, line_count, viewport_height);
-                            }
-                        },
-                        KeyCode::Home => selection_first(&mut state),
-                        KeyCode::End => selection_last(&mut state, page.items.len()),
-                        KeyCode::Char('g') => scroll_to_top(&mut state),
-                        KeyCode::Char('G') => {
-                            let line_count = render_lines(&page, state.selected).len();
-                            let viewport_height = terminal.size()?.height.saturating_sub(6);
-                            scroll_to_bottom(&mut state, line_count, viewport_height);
-                        }
-                        KeyCode::Char('d') => {
-                            if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-                                state.toggle_bookmark_current(page.document.title().unwrap_or("Untitled"));
-                            }
-                        }
-                        KeyCode::Enter => {
-                            activate_selected(&mut state, &mut page)?;
-                            file_mtime = file_mtime_of(&page.location);
-                        }
-                        KeyCode::Char('b') | KeyCode::Backspace => {
-                            if go_back(&mut state) {
-                                match &state.current {
-                                    location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
-                                        page = load_location(location)?;
-                                        file_mtime = file_mtime_of(&page.location);
-                                        state.record_current(page.document.title().unwrap_or("Untitled"));
-                                    }
-                                    PageLocation::Unsupported(_) => {}
-                                }
-                            }
-                        }
-                        KeyCode::Char('f') => {
-                            if go_forward(&mut state) {
-                                match &state.current {
-                                    location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
-                                        page = load_location(location)?;
-                                        file_mtime = file_mtime_of(&page.location);
-                                        state.record_current(page.document.title().unwrap_or("Untitled"));
-                                    }
-                                    PageLocation::Unsupported(_) => {}
-                                }
-                            }
-                        }
-                        KeyCode::Char('r') => {
-                            page = load_location(&page.location)?;
-                            file_mtime = file_mtime_of(&page.location);
-                            state.status = String::from("Reloaded");
-                        }
-                        _ => {}
-                    }
-                }
-                Event::Resize(_, _) => {}
-                _ => {}
+        // Write the tab back, releasing the clone
+        tabs[active_tab] = tab;
+
+        // Poll for keyboard events — handle_key_event borrows tabs mutably
+        if !event::poll(Duration::from_millis(120))? {
+            continue;
+        }
+
+        match event::read()? {
+            Event::Key(key) => {
+                handle_key_event(&mut tabs, &mut active_tab, terminal, key)?;
             }
+            Event::Resize(_, _) => {}
+            _ => {}
+        }
+    }
+}
+
+/// Handle a single keyboard event, including tab switching and find mode.
+fn handle_key_event(
+    tabs: &mut Vec<Tab>,
+    active_tab: &mut usize,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    key: crossterm::event::KeyEvent,
+) -> anyhow::Result<()> {
+    let ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
+
+    // ── Tab management keybindings (no borrows of current tab needed) ──
+    match key.code {
+        KeyCode::Char('t') if ctrl => {
+            let doc = welcome_document();
+            let p = LoadedPage {
+                location: PageLocation::File(PathBuf::from("welcome")),
+                items: collect_items(&doc),
+                document: doc,
+                signature_status: SignatureStatus::Unsigned,
+                stream_rx: None,
+            };
+            let mut s = BrowserState::new(p.location.clone());
+            s.record_current(p.document.title().unwrap_or("Untitled"));
+            tabs.push(Tab {
+                page: p,
+                state: s,
+                file_mtime: None,
+            });
+            *active_tab = tabs.len() - 1;
+            return Ok(());
+        }
+        KeyCode::Char('w') if ctrl && tabs.len() > 1 => {
+            tabs.remove(*active_tab);
+            if *active_tab >= tabs.len() {
+                *active_tab = tabs.len() - 1;
+            }
+            return Ok(());
+        }
+        KeyCode::Tab if ctrl && tabs.len() > 1 => {
+            *active_tab = (*active_tab + 1) % tabs.len();
+            return Ok(());
+        }
+        KeyCode::BackTab if ctrl && tabs.len() > 1 => {
+            *active_tab = if *active_tab == 0 {
+                tabs.len() - 1
+            } else {
+                *active_tab - 1
+            };
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Alt+1-9: jump to tab
+    if alt {
+        match key.code {
+            KeyCode::Char(ch) if ch.is_ascii_digit() => {
+                let idx = (ch as u8 - b'1') as usize;
+                if idx < tabs.len() {
+                    *active_tab = idx;
+                }
+                return Ok(());
+            }
+            _ => {}
         }
     }
 
+    // Clone the current tab to avoid Vec borrow conflicts
+    let mut tab = tabs[*active_tab].clone();
+    let page = &mut tab.page;
+    let state = &mut tab.state;
+    let file_mtime = &mut tab.file_mtime;
+
+    // ── Overlay handling ──────────────────────────────────────────
+    if state.overlay.is_some() {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('h') | KeyCode::Char('?') => {
+                state.overlay = None;
+                state.status = String::from("Closed");
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let count = match state.overlay {
+                    Some(jaringan_browser::Overlay::History) => state.history.len(),
+                    Some(jaringan_browser::Overlay::Bookmarks) => state.bookmarks.len(),
+                    _ => 0,
+                };
+                if count > 0 {
+                    state.overlay_selected = (state.overlay_selected + 1).min(count - 1);
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                state.overlay_selected = state.overlay_selected.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                let url = match state.overlay {
+                    Some(jaringan_browser::Overlay::History) => {
+                        state.history.get(state.overlay_selected).map(|e| e.url.clone())
+                    }
+                    Some(jaringan_browser::Overlay::Bookmarks) => {
+                        state.bookmarks.get(state.overlay_selected).map(|b| b.url.clone())
+                    }
+                    _ => None,
+                };
+                if let Some(url) = url {
+                    state.overlay = None;
+                    let location = parse_start_location(&url).unwrap_or_else(|_| {
+                        PageLocation::Unsupported(url.clone())
+                    });
+                    if matches!(location, PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) {
+                        state.status = format!("⠋ Loading {url}");
+                        let loaded = load_location(&location)?;
+                        navigate_to(state, loaded.location.clone());
+                        state.record_current(loaded.document.title().unwrap_or("Untitled"));
+                        state.status = "Opened from history".to_string();
+                        *page = loaded;
+                        *file_mtime = file_mtime_of(&page.location);
+                    }
+                }
+            }
+            KeyCode::Char(ch) if matches!(state.overlay, Some(jaringan_browser::Overlay::Find)) => {
+                // Find mode: typing characters into the search query
+                if ch.is_control() {
+                    // ignore control chars in find input
+                } else {
+                    state.find_state.query.push(ch);
+                }
+            }
+            KeyCode::Backspace
+                if matches!(state.overlay, Some(jaringan_browser::Overlay::Find)) =>
+            {
+                state.find_state.query.pop();
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    // ── Main keybindings ──────────────────────────────────────────
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => {
+            // quit
+            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "quit").into());
+        }
+        KeyCode::Char(ch) if is_selected_input(page, state.selected) => {
+            edit_selected_input(state, page, InputEdit::Append(ch));
+        }
+        KeyCode::Backspace if is_selected_input(page, state.selected) => {
+            edit_selected_input(state, page, InputEdit::Backspace);
+        }
+        KeyCode::Tab => toggle_mode(state),
+        KeyCode::Char('s') => switch_mode(state, BrowserMode::Scroll),
+        KeyCode::Char('v') => switch_mode(state, BrowserMode::Selection),
+        KeyCode::Char('?') | KeyCode::Char('h') => {
+            state.overlay = None;
+            state.status = String::from("Close overlays");
+        }
+        KeyCode::Char('H') => toggle_overlay(state, jaringan_browser::Overlay::History),
+        KeyCode::Char('B') => toggle_overlay(state, jaringan_browser::Overlay::Bookmarks),
+        KeyCode::Char('f') if ctrl => {
+            toggle_overlay(state, jaringan_browser::Overlay::Find);
+            state.find_state = jaringan_browser::FindState {
+                query: String::new(),
+                matches: Vec::new(),
+                match_idx: 0,
+            };
+        }
+        KeyCode::Down | KeyCode::Char('j') => match state.mode {
+            BrowserMode::Selection => selection_down(state, page.items.len()),
+            BrowserMode::Scroll => {
+                let line_count = render_lines(page, state.selected).len();
+                if let Ok(size) = terminal.size() {
+                    let viewport_height = size.height.saturating_sub(8);
+                    scroll_down(state, line_count, viewport_height);
+                }
+            }
+        },
+        KeyCode::Up | KeyCode::Char('k') => match state.mode {
+            BrowserMode::Selection => selection_up(state),
+            BrowserMode::Scroll => scroll_up(state),
+        },
+        KeyCode::PageDown | KeyCode::Char(' ') => match state.mode {
+            BrowserMode::Selection => selection_down(state, page.items.len()),
+            BrowserMode::Scroll => {
+                let line_count = render_lines(page, state.selected).len();
+                if let Ok(size) = terminal.size() {
+                    let viewport_height = size.height.saturating_sub(8);
+                    scroll_page_down(state, line_count, viewport_height);
+                }
+            }
+        },
+        KeyCode::PageUp => match state.mode {
+            BrowserMode::Selection => selection_up(state),
+            BrowserMode::Scroll => {
+                let line_count = render_lines(page, state.selected).len();
+                if let Ok(size) = terminal.size() {
+                    let viewport_height = size.height.saturating_sub(8);
+                    scroll_page_up(state, line_count, viewport_height);
+                }
+            }
+        },
+        KeyCode::Home => selection_first(state),
+        KeyCode::End => selection_last(state, page.items.len()),
+        KeyCode::Char('g') => scroll_to_top(state),
+        KeyCode::Char('G') => {
+            let line_count = render_lines(page, state.selected).len();
+            if let Ok(size) = terminal.size() {
+                let viewport_height = size.height.saturating_sub(8);
+                scroll_to_bottom(state, line_count, viewport_height);
+            }
+        }
+        KeyCode::Char('d') if ctrl => {
+            state.toggle_bookmark_current(page.document.title().unwrap_or("Untitled"));
+        }
+        KeyCode::Enter => {
+            activate_selected(state, page)?;
+            *file_mtime = file_mtime_of(&page.location);
+        }
+        KeyCode::Char('b') | KeyCode::Backspace => {
+            if go_back(state) {
+                match &state.current {
+                    location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
+                        *page = load_location(location)?;
+                        *file_mtime = file_mtime_of(&page.location);
+                        state.record_current(page.document.title().unwrap_or("Untitled"));
+                    }
+                    PageLocation::Unsupported(_) => {}
+                }
+            }
+        }
+        KeyCode::Char('f') if !ctrl => {
+            if go_forward(state) {
+                match &state.current {
+                    location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
+                        *page = load_location(location)?;
+                        *file_mtime = file_mtime_of(&page.location);
+                        state.record_current(page.document.title().unwrap_or("Untitled"));
+                    }
+                    PageLocation::Unsupported(_) => {}
+                }
+            }
+        }
+        KeyCode::Char('r') => {
+            *page = load_location(&page.location)?;
+            *file_mtime = file_mtime_of(&page.location);
+            state.status = String::from("Reloaded");
+        }
+        KeyCode::Char('n') if ctrl && state.overlay == Some(jaringan_browser::Overlay::Find) => {
+            // Next match in find mode
+            if !state.find_state.matches.is_empty() {
+                state.find_state.match_idx =
+                    (state.find_state.match_idx + 1) % state.find_state.matches.len();
+                state.status = format!(
+                    "Match {}/{}",
+                    state.find_state.match_idx + 1,
+                    state.find_state.matches.len()
+                );
+            }
+        }
+        _ => {}
+    }
+    // Write the cloned tab back (drop borrows first)
+    tabs[*active_tab] = tab;
     Ok(())
+}
+
+/// Draw the full frame including tab bar, page content, footer, and overlays.
+fn draw_frame(
+    frame: &mut ratatui::Frame<'_>,
+    tabs: &[Tab],
+    active_tab: usize,
+    elapsed: Duration,
+) {
+    use ratatui::layout::{Constraint, Direction, Layout, Rect};
+
+    let area = frame.area();
+    frame.render_widget(Clear, area);
+
+    // Tab bar takes 1 line at the top
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // tab bar
+            Constraint::Length(3), // header
+            Constraint::Min(6),    // body
+            Constraint::Length(3), // footer
+        ])
+        .split(area);
+
+    // ── Tab bar ───────────────────────────────────────────────────
+    draw_tab_bar(frame, tabs, active_tab, main_chunks[0]);
+
+    let page = &tabs[active_tab].page;
+    let state = &tabs[active_tab].state;
+
+    // ── Header ────────────────────────────────────────────────────
+    let title = page.document.title().unwrap_or("Untitled Jaringan page");
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled("✦ jaringan ", Style::default().fg(Color::Cyan).bold()),
+        Span::styled(title.to_owned(), Style::default().fg(Color::White).bold()),
+        Span::raw("  "),
+        Span::styled(
+            security_label(&page.signature_status),
+            security_style(&page.signature_status),
+        ),
+    ]))
+    .block(
+        TuiBlock::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+    frame.render_widget(header, main_chunks[1]);
+
+    // ── Body ───────────────────────────────────────────────────────
+    let body = Paragraph::new(render_lines(page, state.selected))
+        .block(
+            TuiBlock::default()
+                .borders(Borders::LEFT | Borders::RIGHT)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
+        .scroll((state.scroll_offset, 0))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(body, main_chunks[2]);
+
+    // ── Footer ─────────────────────────────────────────────────────
+    let spinner = spinner(elapsed);
+    let mode_label = match state.mode {
+        BrowserMode::Selection => "SEL",
+        BrowserMode::Scroll => "SCR",
+    };
+    let mode_color = match state.mode {
+        BrowserMode::Selection => Color::Green,
+        BrowserMode::Scroll => Color::Yellow,
+    };
+
+    let line_count = render_lines(page, state.selected).len();
+    let viewport_height = main_chunks[2].height.saturating_sub(2);
+    let pct = if line_count > viewport_height as usize {
+        ((state.scroll_offset as f64)
+            / (line_count.saturating_sub(viewport_height as usize) as f64)
+            * 100.0) as u8
+    } else {
+        100
+    };
+
+    let help_text = if state.overlay == Some(jaringan_browser::Overlay::Find) {
+        format!(
+            "Find: {}  ({}/{})  Ctrl+n next • Esc close",
+            state.find_state.query,
+            if state.find_state.matches.is_empty() {
+                0
+            } else {
+                state.find_state.match_idx + 1
+            },
+            state.find_state.matches.len(),
+        )
+    } else {
+        "j/k ↓↑ • Enter ↵ • H history • B bookmarks • Ctrl+f find • Ctrl+t tab • ? help • q quit"
+            .to_string()
+    };
+
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled(format!(" {spinner} "), Style::default().fg(Color::Magenta)),
+        Span::styled(
+            format!(" {mode_label} "),
+            Style::default().fg(Color::Black).bg(mode_color).bold(),
+        ),
+        Span::raw(" "),
+        Span::styled(&state.status, Style::default().fg(Color::Yellow)),
+        Span::raw(" · "),
+        Span::styled(format!("{pct}%"), Style::default().fg(Color::DarkGray)),
+        Span::raw("  "),
+        Span::styled(
+            &help_text,
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            state.current.display_url(),
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+        ),
+    ]))
+    .block(
+        TuiBlock::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+    frame.render_widget(footer, main_chunks[3]);
+
+    // ── Overlays ──────────────────────────────────────────────────
+    match state.overlay {
+        Some(jaringan_browser::Overlay::Help) => draw_help_overlay(frame, state),
+        Some(jaringan_browser::Overlay::History) => draw_history_overlay(frame, state),
+        Some(jaringan_browser::Overlay::Bookmarks) => draw_bookmarks_overlay(frame, state),
+        Some(jaringan_browser::Overlay::Find) => draw_find_overlay(frame, state),
+        None => {}
+    }
+}
+
+/// Draw the tab bar at the top of the screen.
+fn draw_tab_bar(frame: &mut ratatui::Frame<'_>, tabs: &[Tab], active_tab: usize, area: Rect) {
+    let mut spans = Vec::new();
+    for (i, tab) in tabs.iter().enumerate() {
+        let title = tab.page.document.title().unwrap_or("Untitled");
+        let label = if tab.page.location == PageLocation::File(PathBuf::from("welcome")) {
+            format!(" Welcome ")
+        } else if title.len() > 20 {
+            format!(" {}… ", &title[..18])
+        } else {
+            format!(" {title} ")
+        };
+        let style = if i == active_tab {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::DarkGray)
+        };
+        let prefix = if i == active_tab { "▸" } else { " " };
+        spans.push(Span::styled(
+            format!("{prefix}{label}{prefix}"),
+            style,
+        ));
+    }
+    if spans.is_empty() {
+        return;
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage) -> anyhow::Result<()> {
@@ -1360,6 +1670,7 @@ fn draw(
         Some(jaringan_browser::Overlay::Help) => draw_help_overlay(frame, state),
         Some(jaringan_browser::Overlay::History) => draw_history_overlay(frame, state),
         Some(jaringan_browser::Overlay::Bookmarks) => draw_bookmarks_overlay(frame, state),
+        Some(jaringan_browser::Overlay::Find) => draw_find_overlay(frame, state),
         None => {}
     }
 }
@@ -1452,6 +1763,47 @@ fn draw_bookmarks_overlay(frame: &mut ratatui::Frame<'_>, state: &BrowserState) 
                 .title_alignment(ratatui::layout::Alignment::Center)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Magenta).bold()),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, overlay_area[1]);
+    frame.render_widget(block, overlay_area[1]);
+}
+
+/// Draw the find-in-page overlay — shows the search query and match count.
+fn draw_find_overlay(frame: &mut ratatui::Frame<'_>, state: &BrowserState) {
+    let area = frame.area();
+    let overlay_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(3)])
+        .split(area);
+
+    let match_info = if state.find_state.matches.is_empty() {
+        if state.find_state.query.is_empty() {
+            String::from("  Type to search...")
+        } else {
+            String::from("  No matches")
+        }
+    } else {
+        format!(
+            "  {} of {} matches  (Ctrl+n next, Ctrl+p prev)",
+            state.find_state.match_idx + 1,
+            state.find_state.matches.len(),
+        )
+    };
+
+    let text = format!(
+        "Find: {}{match_info}",
+        state.find_state.query,
+    );
+
+    let block = Paragraph::new(text)
+        .block(
+            TuiBlock::default()
+                .title(" 🔍 Find ")
+                .title_alignment(ratatui::layout::Alignment::Center)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green).bold()),
         )
         .wrap(Wrap { trim: false });
 
