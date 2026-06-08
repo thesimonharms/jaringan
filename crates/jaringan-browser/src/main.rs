@@ -3,6 +3,7 @@ use std::{
     io::{self, Stdout},
     net::TcpListener,
     path::{Path, PathBuf},
+    sync::{mpsc, Arc, Mutex},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -26,8 +27,8 @@ use jaringan_core::{
 };
 use jaringan_protocol::{
     ContentType, EncryptedTcpConfig, EncryptionKey, JaringanUrl, LocalFileResolver, PageResolver,
-    Request, Response, ResponseTag, StatusCode, fetch_tcp, fetch_tcp_encrypted, post_tcp,
-    post_tcp_with_action_token, serve, serve_encrypted,
+    Request, Response, ResponseTag, StatusCode, fetch_tcp, fetch_tcp_encrypted, fetch_tcp_stream,
+    post_tcp, post_tcp_with_action_token, serve, serve_encrypted,
 };
 use jaringan_render::render_plain;
 use ratatui::{
@@ -145,6 +146,7 @@ struct LoadedPage {
     document: Document,
     items: Vec<InteractiveItem>,
     signature_status: SignatureStatus,
+    stream_rx: Option<Arc<Mutex<mpsc::Receiver<String>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -309,6 +311,7 @@ fn print_response(response: Response) {
     for tag in response.tags {
         match tag {
             ResponseTag::Redirect { target } => println!("Tag-Redirect: {target}"),
+            ResponseTag::Stream => println!("Tag-Stream: true"),
         }
     }
     println!();
@@ -462,6 +465,7 @@ fn run_app(
                 items: collect_items(&doc),
                 document: doc,
                 signature_status: SignatureStatus::Unsigned,
+                stream_rx: None,
             };
             (p.location.clone(), p)
         }
@@ -482,6 +486,20 @@ fn run_app(
         // Check if the current .jrg file changed on disk (live reload)
         if matches!(page.location, PageLocation::File(ref p) if p.is_file()) {
             check_live_reload(&mut page, &mut state, &mut file_mtime);
+        }
+
+        // Check for streaming blocks from a live JRG stream
+        if let Some(ref rx) = page.stream_rx {
+            if let Ok(block) = rx.lock().unwrap().try_recv() {
+                if let Ok(new_doc) = parse_document(&block) {
+                    let block_count = new_doc.blocks.len();
+                    for b in new_doc.blocks {
+                        page.document.blocks.push(b);
+                    }
+                    page.items = collect_items(&page.document);
+                    state.status = format!("Stream update: +{block_count} blocks");
+                }
+            }
         }
 
         if event::poll(Duration::from_millis(120))? {
@@ -722,6 +740,7 @@ fn activate_button(
                 items: collect_items(&document),
                 document,
                 signature_status: SignatureStatus::Unsigned,
+                stream_rx: None,
             };
         }
         (PageLocation::File(current_file), ActionMethod::Post) if target.starts_with("/") => {
@@ -740,6 +759,7 @@ fn activate_button(
                 items: collect_items(&document),
                 document,
                 signature_status: SignatureStatus::Unsigned,
+                stream_rx: None,
             };
         }
         (PageLocation::File(current_file), ActionMethod::Get) if target == "/search" => {
@@ -753,6 +773,7 @@ fn activate_button(
                 items: collect_items(&document),
                 document,
                 signature_status: SignatureStatus::Unsigned,
+                stream_rx: None,
             };
         }
         _ => {
@@ -978,6 +999,7 @@ fn load_web_page(url: &str, keyring: &PublicKeyring) -> anyhow::Result<LoadedPag
         document,
         items,
         signature_status: verify_source_signature(&response.body, keyring),
+        stream_rx: None,
     })
 }
 
@@ -995,6 +1017,7 @@ fn load_file_page_with_keyring(path: &Path, keyring: &PublicKeyring) -> anyhow::
             document,
             items,
             signature_status: SignatureStatus::Unsigned,
+            stream_rx: None,
         });
     }
     let source =
@@ -1009,7 +1032,32 @@ fn load_file_page_with_keyring(path: &Path, keyring: &PublicKeyring) -> anyhow::
         document,
         items,
         signature_status,
+        stream_rx: None,
     })
+}
+
+fn start_stream_reader(url: &JaringanUrl) -> (Option<Response>, Arc<Mutex<mpsc::Receiver<String>>>, String) {
+    let (tx, rx) = mpsc::channel();
+    let rx = Arc::new(Mutex::new(rx));
+    let url_copy = url.clone();
+
+    let (response, initial_body) = match fetch_tcp_stream(&url_copy) {
+        Ok(mut conn) => {
+            let resp = conn.response.clone();
+            let initial = conn.read_block().ok().flatten().unwrap_or_default();
+            std::thread::spawn(move || {
+                while let Ok(Some(block)) = conn.read_block() {
+                    if tx.send(block).is_err() {
+                        break;
+                    }
+                }
+            });
+            (Some(resp), initial)
+        }
+        Err(_) => (None, String::new()),
+    };
+
+    (response, rx, initial_body)
 }
 
 fn load_network_page_with_keyring(
@@ -1054,11 +1102,21 @@ fn load_network_page_with_keyring(
             .with_context(|| format!("failed to parse response from {current}"))?;
         let items = collect_items(&document);
 
+        // Check if this is a streaming response — open a streaming connection
+        let stream_rx = if response.tags.contains(&ResponseTag::Stream)
+            || response.content_type == ContentType::JrgStream
+        {
+            Some(start_stream_reader(&current).1)
+        } else {
+            None
+        };
+
         return Ok(LoadedPage {
             location: PageLocation::Network(current),
             document,
             items,
             signature_status: verify_source_signature(&response.body, keyring),
+            stream_rx,
         });
     }
 
@@ -1066,8 +1124,9 @@ fn load_network_page_with_keyring(
 }
 
 fn redirect_target(response: &Response) -> Option<&str> {
-    response.tags.first().map(|tag| match tag {
-        ResponseTag::Redirect { target } => target.as_str(),
+    response.tags.iter().find_map(|tag| match tag {
+        ResponseTag::Redirect { target } => Some(target.as_str()),
+        ResponseTag::Stream => None,
     })
 }
 
@@ -1085,6 +1144,7 @@ fn network_error_page(location: JaringanUrl, message: String) -> LoadedPage {
         document,
         items: Vec::new(),
         signature_status: SignatureStatus::Unsigned,
+        stream_rx: None,
     }
 }
 
@@ -1903,6 +1963,7 @@ fn load_directory_page(path: &Path, _keyring: &PublicKeyring) -> anyhow::Result<
         items: collect_items(&document),
         document,
         signature_status: SignatureStatus::Unsigned,
+        stream_rx: None,
     })
 }
 
@@ -2052,6 +2113,7 @@ mod tests {
             items: collect_items(&document),
             document,
             signature_status: SignatureStatus::Unsigned,
+            stream_rx: None,
         };
 
         let rendered = render_lines(&page, 0)
@@ -2089,6 +2151,7 @@ mod tests {
             items: collect_items(&document),
             document,
             signature_status: SignatureStatus::Unsigned,
+            stream_rx: None,
         };
         let mut state = BrowserState::new(page.location.clone());
         state.selected = 1;
@@ -2130,6 +2193,7 @@ mod tests {
             items: collect_items(&document),
             document,
             signature_status: SignatureStatus::Unsigned,
+            stream_rx: None,
         };
         let mut state = BrowserState::new(page.location.clone());
         state.selected = 1;
@@ -2161,6 +2225,7 @@ mod tests {
             items: collect_items(&document),
             document,
             signature_status: SignatureStatus::Unsigned,
+            stream_rx: None,
         };
         let mut state = BrowserState::new(page.location.clone());
 
@@ -2246,6 +2311,7 @@ mod tests {
             items: collect_items(&document),
             document,
             signature_status: SignatureStatus::Unsigned,
+            stream_rx: None,
         };
         let mut state = BrowserState::new(page.location.clone());
         state.selected = 1;

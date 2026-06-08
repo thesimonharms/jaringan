@@ -64,6 +64,9 @@ pub fn jrg_response_to_http_response(
             ResponseTag::Redirect { target } => {
                 headers.push(("Location".to_string(), target));
             }
+            ResponseTag::Stream => {
+                headers.push(("X-JRG-Stream".to_string(), "true".to_string()));
+            }
         }
     }
 

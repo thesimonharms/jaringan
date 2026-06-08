@@ -191,6 +191,8 @@ impl Response {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResponseTag {
     Redirect { target: String },
+    /// Response is a stream — the connection stays open for incremental blocks.
+    Stream,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,6 +441,7 @@ impl StatusCode {
 pub enum ContentType {
     JaringanPage,
     PlainText,
+    JrgStream,
 }
 
 impl ContentType {
@@ -447,6 +450,7 @@ impl ContentType {
         match media_type {
             "text/jrg" | "text/jaringan" => Some(Self::JaringanPage),
             "text/plain" => Some(Self::PlainText),
+            "text/jrg-stream" => Some(Self::JrgStream),
             _ => None,
         }
     }
@@ -455,6 +459,7 @@ impl ContentType {
         match self {
             Self::JaringanPage => "text/jrg; charset=utf-8",
             Self::PlainText => "text/plain; charset=utf-8",
+            Self::JrgStream => "text/jrg-stream; charset=utf-8",
         }
     }
 }
@@ -754,6 +759,117 @@ fn send_tcp_with_timeout(request: Request, timeout: Duration) -> Result<Response
     read_response(&mut stream)
 }
 
+// ── Streaming ─────────────────────────────────────────────────────────
+
+/// Read just the JRG response header (status + tag headers), leaving the
+/// body in the stream for incremental reading.
+fn read_response_header(reader: &mut BufReader<TcpStream>) -> Result<Response, WireError> {
+    let mut header_lines: Vec<String> = Vec::new();
+    loop {
+        let mut line = String::new();
+        let bytes = reader.read_line(&mut line)?;
+        if bytes == 0 {
+            return Err(WireError::BadResponse);
+        }
+        if line == "\n" || line == "\r\n" {
+            break;
+        }
+        header_lines.push(line.trim_end().to_owned());
+    }
+
+    let status_line = header_lines.first().ok_or(WireError::BadResponse)?;
+    let mut status_parts = status_line.split_whitespace();
+    if status_parts.next() != Some("JRG/0.1") {
+        return Err(WireError::BadResponse);
+    }
+    let code = status_parts
+        .next()
+        .ok_or(WireError::BadResponse)?
+        .parse::<u16>()
+        .map_err(|_| WireError::BadResponse)?;
+    let status = StatusCode::from_u16(code).ok_or(WireError::BadResponse)?;
+
+    let mut content_type = None;
+    let mut tags = Vec::new();
+    for line in &header_lines[1..] {
+        if let Some(value) = line.strip_prefix("Content-Type:") {
+            content_type = ContentType::from_header(value.trim());
+        } else if let Some(value) = line.strip_prefix("Tag-Redirect:") {
+            tags.push(ResponseTag::Redirect {
+                target: value.trim().to_owned(),
+            });
+        } else if line.trim() == "Tag-Stream: true" {
+            tags.push(ResponseTag::Stream);
+        }
+    }
+
+    Ok(Response {
+        status,
+        content_type: content_type.ok_or(WireError::BadResponse)?,
+        tags,
+        body: String::new(),
+    })
+}
+
+/// A streaming JRG connection that keeps the TCP socket open for
+/// incremental blocks. Blocks are separated by `.\n` on a line by itself.
+pub struct StreamConnection {
+    /// The initial response (status, content-type, tags).  The body is
+    /// initially empty; call `read_block()` to read the first one.
+    pub response: Response,
+    reader: BufReader<TcpStream>,
+}
+
+impl StreamConnection {
+    /// Read the next block of JRG content.  Returns `Ok(None)` when the
+    /// server closes the connection.  Blocks are separated by `.\n` on a
+    /// line by itself; everything up to `.\n` or EOF is one block.
+    pub fn read_block(&mut self) -> Result<Option<String>, WireError> {
+        let mut block = String::new();
+        loop {
+            let mut line = String::new();
+            let bytes = self.reader.read_line(&mut line)?;
+            if bytes == 0 {
+                return if block.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(block))
+                };
+            }
+            if line.trim_end() == "." {
+                return Ok(Some(block));
+            }
+            block.push_str(&line);
+        }
+    }
+}
+
+/// Fetch a JRG URL and keep the TCP connection alive for streaming.
+/// The server must respond with `Tag-Stream: true` (or `Content-Type:
+/// text/jrg-stream`).  Returns the header-only response and a
+/// `StreamConnection` for reading incremental blocks.
+pub fn fetch_tcp_stream(url: &JaringanUrl) -> Result<StreamConnection, WireError> {
+    fetch_tcp_stream_with_timeout(url, Duration::from_secs(5))
+}
+
+/// Like `fetch_tcp_stream` but with a configurable timeout.
+pub fn fetch_tcp_stream_with_timeout(
+    url: &JaringanUrl,
+    timeout: Duration,
+) -> Result<StreamConnection, WireError> {
+    let request = Request::new(url.clone());
+    let mut addrs = (request.url.host(), request.url.port_or_default()).to_socket_addrs()?;
+    let addr = addrs.next().ok_or(WireError::BadAddress)?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
+    // Long read timeout for streaming; will be signalled by connection close
+    stream.set_read_timeout(Some(Duration::from_secs(300)))?;
+    stream.set_write_timeout(Some(timeout))?;
+    write_wire_request(&mut stream, &request)?;
+    let mut reader = BufReader::new(stream);
+    let response = read_response_header(&mut reader)?;
+    Ok(StreamConnection { response, reader })
+}
+
 fn send_tcp_encrypted_with_timeout(
     request: Request,
     config: &EncryptedTcpConfig,
@@ -871,6 +987,7 @@ pub fn write_response(writer: &mut impl Write, response: &Response) -> io::Resul
     for tag in &response.tags {
         match tag {
             ResponseTag::Redirect { target } => writeln!(writer, "Tag-Redirect: {target}")?,
+            ResponseTag::Stream => writeln!(writer, "Tag-Stream: true")?,
         }
     }
     writeln!(writer)?;
@@ -1025,6 +1142,8 @@ pub fn read_response(reader: &mut impl Read) -> Result<Response, WireError> {
             tags.push(ResponseTag::Redirect {
                 target: value.trim().to_owned(),
             });
+        } else if line.trim() == "Tag-Stream: true" {
+            tags.push(ResponseTag::Stream);
         }
     }
 
