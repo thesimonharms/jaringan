@@ -75,6 +75,24 @@ alice ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 
 Set `JARINGAN_KEYRING=/path/to/keyring` to point the browser at another keyring file.
 
+## Browser controls
+
+The interactive `open` command uses modal keyboard navigation:
+
+| Mode | Keys | Action |
+|------|------|--------|
+| Both | `Tab` / `s` / `v` | Toggle / Scroll / Selection mode |
+| Selection | `j` / `k` / `↓` / `↑` | Move selection |
+| Selection | `Enter` | Open link / Press button / Edit input |
+| Selection | `g` / `G` | Jump to top / bottom of page |
+| Selection | `Home` / `End` | First / Last selectable item |
+| Selection | `PgDn` / `Space` / `PgUp` | Page down / Page up |
+| Both | `b` | Go back |
+| Both | `f` | Go forward |
+| Both | `r` | Reload page |
+| Both | `?` / `h` | Toggle help overlay |
+| Both | `q` / `Esc` | Quit |
+
 Specs:
 
 - `docs/spec/jrg-page-format.md`

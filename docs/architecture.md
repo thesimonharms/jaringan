@@ -106,3 +106,4 @@ Application shell:
 8. **M7 encryption capabilities:** keep `jrg://` as one scheme, define XChaCha20-Poly1305 encrypted payload primitives, serialize encryption capability metadata, and support encrypted TCP request/response framing with pre-shared keys.
 9. **M8 action auth model:** add explicit `auth` capability tokens to side-effectful action buttons, carry them as `Action-Token` headers, and reject unauthorized demo POSTs before writing side effects.
 10. **M9 browser experience:** add rich renderable blocks (quotes, lists, rules, tables), improve plain/TUI rendering, and make the terminal browser more aesthetic with accent styling and aligned layouts.
+11. **M10 browser ergonomics:** add help overlay (`?`/`h`), forward history (`f`), page scrolling (`PgUp`/`PgDown`/`g`/`G`), selection shortcuts (`Home`/`End`), and polished key hints in footer and docs.

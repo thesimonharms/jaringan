@@ -15,8 +15,9 @@ use crossterm::{
 };
 use jaringan_browser::{
     ActionConfirmation, BrowserMode, BrowserState, PageLocation, cache_filename_for_url, go_back,
-    navigate_to, resolve_target, scroll_down, scroll_up, selection_down, selection_up, switch_mode,
-    toggle_mode,
+    go_forward, navigate_to, resolve_target, scroll_down, scroll_page_down, scroll_page_up,
+    scroll_to_bottom, scroll_to_top, scroll_up, selection_down, selection_first, selection_last,
+    selection_up, switch_mode, toggle_help, toggle_mode,
 };
 use jaringan_core::{
     ActionMethod, Block, Document, Image, Input, PublicKeyring, SearchEntry, SearchIndex,
@@ -33,7 +34,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style, Stylize},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block as TuiBlock, Borders, Clear, Paragraph, Wrap},
 };
 
@@ -358,7 +359,12 @@ fn run_app(
 
     loop {
         clamp_selection(&mut state, page.items.len());
-        terminal.draw(|frame| draw(frame, &state, &page, started.elapsed()))?;
+        let frame_result = terminal.draw(|frame| draw(frame, &state, &page, started.elapsed()));
+        if state.show_help {
+            terminal.draw(draw_help_overlay)?;
+        } else if let Err(e) = frame_result {
+            return Err(e.into());
+        }
 
         if event::poll(Duration::from_millis(120))? {
             match event::read()? {
@@ -373,6 +379,7 @@ fn run_app(
                     KeyCode::Tab => toggle_mode(&mut state),
                     KeyCode::Char('s') => switch_mode(&mut state, BrowserMode::Scroll),
                     KeyCode::Char('v') => switch_mode(&mut state, BrowserMode::Selection),
+                    KeyCode::Char('?') | KeyCode::Char('h') => toggle_help(&mut state),
                     KeyCode::Down | KeyCode::Char('j') => match state.mode {
                         BrowserMode::Selection => selection_down(&mut state, page.items.len()),
                         BrowserMode::Scroll => {
@@ -385,9 +392,43 @@ fn run_app(
                         BrowserMode::Selection => selection_up(&mut state),
                         BrowserMode::Scroll => scroll_up(&mut state),
                     },
+                    KeyCode::PageDown | KeyCode::Char(' ') => match state.mode {
+                        BrowserMode::Selection => selection_down(&mut state, page.items.len()),
+                        BrowserMode::Scroll => {
+                            let line_count = render_lines(&page, state.selected).len();
+                            let viewport_height = terminal.size()?.height.saturating_sub(6);
+                            scroll_page_down(&mut state, line_count, viewport_height);
+                        }
+                    },
+                    KeyCode::PageUp => match state.mode {
+                        BrowserMode::Selection => selection_up(&mut state),
+                        BrowserMode::Scroll => {
+                            let line_count = render_lines(&page, state.selected).len();
+                            let viewport_height = terminal.size()?.height.saturating_sub(6);
+                            scroll_page_up(&mut state, line_count, viewport_height);
+                        }
+                    },
+                    KeyCode::Home => selection_first(&mut state),
+                    KeyCode::End => selection_last(&mut state, page.items.len()),
+                    KeyCode::Char('g') => scroll_to_top(&mut state),
+                    KeyCode::Char('G') => {
+                        let line_count = render_lines(&page, state.selected).len();
+                        let viewport_height = terminal.size()?.height.saturating_sub(6);
+                        scroll_to_bottom(&mut state, line_count, viewport_height);
+                    }
                     KeyCode::Enter => activate_selected(&mut state, &mut page)?,
                     KeyCode::Char('b') | KeyCode::Backspace => {
                         if go_back(&mut state) {
+                            match &state.current {
+                                location @ (PageLocation::File(_) | PageLocation::Network(_)) => {
+                                    page = load_location(location)?;
+                                }
+                                PageLocation::Unsupported(_) => {}
+                            }
+                        }
+                    }
+                    KeyCode::Char('f') => {
+                        if go_forward(&mut state) {
                             match &state.current {
                                 location @ (PageLocation::File(_) | PageLocation::Network(_)) => {
                                     page = load_location(location)?;
@@ -1009,6 +1050,29 @@ fn draw(
     frame.render_widget(footer, chunks[2]);
 }
 
+fn draw_help_overlay(frame: &mut ratatui::Frame<'_>) {
+    let area = frame.area();
+    let overlay_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Max(area.height.saturating_sub(4)),
+        ])
+        .split(area);
+
+    let help_block = Paragraph::new(Text::from(help_lines()))
+        .block(
+            TuiBlock::default()
+                .title(" Help ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan).bold()),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, overlay_area[1]);
+    frame.render_widget(help_block, overlay_area[1]);
+}
+
 fn render_lines(page: &LoadedPage, selected: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut item_index = 0usize;
@@ -1219,6 +1283,63 @@ fn canonicalish(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn help_lines() -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            "Browser keys",
+            Style::default().fg(Color::Cyan).bold(),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("  ? / h", Style::default().fg(Color::Yellow)),
+            Span::raw("      Toggle help overlay"),
+        ]),
+        Line::from(vec![
+            Span::styled("  j / k / ↓ / ↑", Style::default().fg(Color::Yellow)),
+            Span::raw("  Move selection"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  PgDn / PgUp / Space / b",
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::raw("  Scroll page / back"),
+        ]),
+        Line::from(vec![
+            Span::styled("  g / G", Style::default().fg(Color::Yellow)),
+            Span::raw("      Jump to top / bottom"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Home / End", Style::default().fg(Color::Yellow)),
+            Span::raw("  First item / Last item"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Enter", Style::default().fg(Color::Yellow)),
+            Span::raw("      Open link / Press button / Edit input"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Tab / s / v", Style::default().fg(Color::Yellow)),
+            Span::raw("      Toggle / Scroll / Selection mode"),
+        ]),
+        Line::from(vec![
+            Span::styled("  b", Style::default().fg(Color::Yellow)),
+            Span::raw("      Go back"),
+        ]),
+        Line::from(vec![
+            Span::styled("  f", Style::default().fg(Color::Yellow)),
+            Span::raw("      Go forward"),
+        ]),
+        Line::from(vec![
+            Span::styled("  r", Style::default().fg(Color::Yellow)),
+            Span::raw("      Reload page"),
+        ]),
+        Line::from(vec![
+            Span::styled("  q / Esc", Style::default().fg(Color::Yellow)),
+            Span::raw("      Quit"),
+        ]),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1300,6 +1421,27 @@ mod tests {
         assert_eq!(final_url.as_str(), format!("jrg://{addr}/new.jrg"));
         assert_eq!(response.status, StatusCode::Ok);
         assert_eq!(response.body, "# New Page\n");
+    }
+
+    #[test]
+    fn help_overlay_lists_ergonomic_browser_shortcuts() {
+        let rendered = help_lines()
+            .into_iter()
+            .map(|line| {
+                line.spans
+                    .into_iter()
+                    .map(|span| span.content.into_owned())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Browser keys"));
+        assert!(rendered.contains("? / h"));
+        assert!(rendered.contains("back"));
+        assert!(rendered.contains("forward"));
+        assert!(rendered.contains("PgDn / PgUp"));
+        assert!(rendered.contains("g / G"));
     }
 
     #[test]
