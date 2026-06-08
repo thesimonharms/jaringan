@@ -3,7 +3,7 @@
 This page exercises M4 editable inputs, URL-encoded payload collection, and explicit action confirmation.
 
 ? q label="Search query" value="laksa" placeholder="Restaurant or dish"
-! search label="Search" method="POST" target="/actions/search" confirm="Submit search?"
+! search label="Search" method="POST" target="/actions/search" confirm="Submit search?" auth="demo-search"
 
 ~~~~~
 title: M4 action form example

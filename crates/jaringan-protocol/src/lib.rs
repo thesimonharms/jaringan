@@ -127,6 +127,7 @@ pub struct Request {
     pub method: RequestMethod,
     pub url: JaringanUrl,
     pub body: String,
+    pub action_token: Option<String>,
 }
 
 impl Request {
@@ -135,6 +136,7 @@ impl Request {
             method: RequestMethod::Get,
             url,
             body: String::new(),
+            action_token: None,
         }
     }
 
@@ -143,7 +145,13 @@ impl Request {
             method: RequestMethod::Post,
             url,
             body: body.into(),
+            action_token: None,
         }
+    }
+
+    pub fn with_action_token(mut self, token: impl Into<String>) -> Self {
+        self.action_token = Some(token.into());
+        self
     }
 }
 
@@ -490,6 +498,13 @@ impl LocalFileResolver {
     }
 
     fn handle_demo_search_action(&self, request: &Request) -> Result<Response, ResolveError> {
+        if request.action_token.as_deref() != Some("demo-search") {
+            return Ok(Response::text(
+                StatusCode::Forbidden,
+                "missing or invalid action capability token",
+            ));
+        }
+
         fs::create_dir_all(&self.root).map_err(|source| ResolveError::Write {
             path: self.root.clone(),
             source,
@@ -672,6 +687,17 @@ pub fn post_tcp(url: &JaringanUrl, body: String) -> Result<Response, WireError> 
     send_tcp_with_timeout(Request::post(url.clone(), body), Duration::from_secs(5))
 }
 
+pub fn post_tcp_with_action_token(
+    url: &JaringanUrl,
+    body: String,
+    token: impl Into<String>,
+) -> Result<Response, WireError> {
+    send_tcp_with_timeout(
+        Request::post(url.clone(), body).with_action_token(token),
+        Duration::from_secs(5),
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptedTcpConfig {
     pub capability: EncryptionCapability,
@@ -758,6 +784,9 @@ fn write_wire_request(writer: &mut impl Write, request: &Request) -> io::Result<
         request.url.as_str()
     )?;
     writeln!(writer, "Host: {}", request.url.authority())?;
+    if let Some(token) = &request.action_token {
+        writeln!(writer, "Action-Token: {token}")?;
+    }
     if !request.body.is_empty() {
         writeln!(writer, "Content-Length: {}", request.body.len())?;
     }
@@ -791,6 +820,7 @@ fn read_wire_request_from_reader(reader: &mut impl BufRead) -> Result<Request, W
     let target = parts.next().ok_or(WireError::BadRequest)?;
 
     let mut host = String::new();
+    let mut action_token = None;
     let mut content_length = 0usize;
     loop {
         let mut line = String::new();
@@ -803,6 +833,8 @@ fn read_wire_request_from_reader(reader: &mut impl BufRead) -> Result<Request, W
         }
         if let Some(value) = trimmed.strip_prefix("Host:") {
             host = value.trim().to_owned();
+        } else if let Some(value) = trimmed.strip_prefix("Action-Token:") {
+            action_token = Some(value.trim().to_owned());
         } else if let Some(value) = trimmed.strip_prefix("Content-Length:") {
             content_length = value.trim().parse().map_err(|_| WireError::BadRequest)?;
         }
@@ -820,7 +852,12 @@ fn read_wire_request_from_reader(reader: &mut impl BufRead) -> Result<Request, W
     reader.read_exact(&mut body)?;
     let body = String::from_utf8(body).map_err(|_| WireError::BadRequest)?;
 
-    Ok(Request { method, url, body })
+    Ok(Request {
+        method,
+        url,
+        body,
+        action_token,
+    })
 }
 
 pub fn write_response(writer: &mut impl Write, response: &Response) -> io::Result<()> {
@@ -1319,19 +1356,44 @@ mod tests {
         let resolver = LocalFileResolver::new(&root);
 
         let response = resolver
+            .fetch(
+                &Request::post(
+                    JaringanUrl::parse("jrg://localhost/actions/search").unwrap(),
+                    "q=laksa".to_owned(),
+                )
+                .with_action_token("demo-search"),
+            )
+            .unwrap();
+
+        assert_eq!(response.status, StatusCode::Ok);
+        assert!(response.body.contains("# Search Results"));
+        let log = fs::read_to_string(root.join(".jrg-actions.log")).unwrap();
+        assert!(log.contains("POST /actions/search q=laksa"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn local_resolver_rejects_post_actions_without_capability_token() {
+        let root =
+            std::env::temp_dir().join(format!("jaringan-action-auth-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let resolver = LocalFileResolver::new(&root);
+
+        let response = resolver
             .fetch(&Request::post(
                 JaringanUrl::parse("jrg://localhost/actions/search").unwrap(),
                 "q=laksa".to_owned(),
             ))
             .unwrap();
 
-        assert_eq!(response.status, StatusCode::Ok);
-        assert!(response.body.contains("# Search Results"));
-        assert!(response.body.contains("laksa"));
-        assert_eq!(
-            fs::read_to_string(root.join(".jrg-actions.log")).unwrap(),
-            "POST /actions/search q=laksa\n"
+        assert_eq!(response.status, StatusCode::Forbidden);
+        assert!(
+            response
+                .body
+                .contains("missing or invalid action capability token")
         );
-        fs::remove_dir_all(root).unwrap();
+        assert!(!root.join(".jrg-actions.log").exists());
+        let _ = fs::remove_dir_all(&root);
     }
 }

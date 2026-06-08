@@ -32,7 +32,7 @@ The current web is optimized for graphical browsers. AI browser-use workflows ha
    - `serve` exposes a local document root over TCP.
    - `get` fetches `jrg://host:port/path` over TCP.
    - `open` launches the modal ratatui browser for either local `.jrg` files or `jrg://` URLs.
-   - Later: network transport, forms/actions, history persistence, bookmarks.
+   - Forms/actions support editable inputs, explicit confirmation, and capability-token-gated demo side effects.
 
 ## Repository layout
 

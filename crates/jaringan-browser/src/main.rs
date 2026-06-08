@@ -24,8 +24,8 @@ use jaringan_core::{
 };
 use jaringan_protocol::{
     ContentType, EncryptedTcpConfig, EncryptionKey, JaringanUrl, LocalFileResolver, PageResolver,
-    Request, Response, ResponseTag, StatusCode, fetch_tcp, fetch_tcp_encrypted, post_tcp, serve,
-    serve_encrypted,
+    Request, Response, ResponseTag, StatusCode, fetch_tcp, fetch_tcp_encrypted, post_tcp,
+    post_tcp_with_action_token, serve, serve_encrypted,
 };
 use jaringan_render::render_plain;
 use ratatui::{
@@ -98,19 +98,20 @@ struct LoadedPage {
 }
 
 #[derive(Debug, Clone)]
+struct ButtonAction {
+    id: String,
+    label: String,
+    target: String,
+    method: ActionMethod,
+    confirm: Option<String>,
+    auth: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 enum InteractiveItem {
-    Link {
-        label: String,
-        target: String,
-    },
+    Link { label: String, target: String },
     Input(Input),
-    Button {
-        id: String,
-        label: String,
-        target: String,
-        method: ActionMethod,
-        confirm: Option<String>,
-    },
+    Button(ButtonAction),
     Image(Image),
 }
 
@@ -429,13 +430,7 @@ fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage) -> anyhow:
                 state.status = format!("Unsupported target for now: {target}");
             }
         },
-        InteractiveItem::Button {
-            id,
-            label,
-            target,
-            method,
-            confirm,
-        } => activate_button(state, page, id, label, target, method, confirm)?,
+        InteractiveItem::Button(action) => activate_button(state, page, action)?,
         InteractiveItem::Input(input) => {
             state.pending_confirmation = None;
             state.status = input_status(&input);
@@ -452,12 +447,17 @@ fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage) -> anyhow:
 fn activate_button(
     state: &mut BrowserState,
     page: &mut LoadedPage,
-    id: String,
-    label: String,
-    target: String,
-    method: ActionMethod,
-    confirm: Option<String>,
+    action: ButtonAction,
 ) -> anyhow::Result<()> {
+    let ButtonAction {
+        id,
+        label,
+        target,
+        method,
+        confirm,
+        auth,
+    } = action;
+
     if let Some(prompt) = confirm {
         let already_confirmed = state
             .pending_confirmation
@@ -479,7 +479,11 @@ fn activate_button(
             let action_url = current
                 .resolve(&target)
                 .with_context(|| format!("bad action target `{target}`"))?;
-            let response = post_tcp(&action_url, payload)?;
+            let response = if let Some(token) = auth.as_deref() {
+                post_tcp_with_action_token(&action_url, payload, token)?
+            } else {
+                post_tcp(&action_url, payload)?
+            };
             let document = document_from_response(&response)?;
             navigate_to(state, PageLocation::Network(action_url));
             state.status = format!("Submitted POST action: {target_with_payload}");
@@ -494,7 +498,11 @@ fn activate_button(
             let root = current_file.parent().unwrap_or_else(|| Path::new("."));
             let action_url = JaringanUrl::parse(&format!("jrg://localhost{target}"))?;
             let resolver = LocalFileResolver::new(root);
-            let response = resolver.fetch(&Request::post(action_url, payload))?;
+            let mut request = Request::post(action_url, payload);
+            if let Some(token) = auth.as_deref() {
+                request = request.with_action_token(token);
+            }
+            let response = resolver.fetch(&request)?;
             let document = document_from_response(&response)?;
             state.status = format!("Submitted local POST action: {target_with_payload}");
             *page = LoadedPage {
@@ -918,13 +926,14 @@ fn collect_items(document: &Document) -> Vec<InteractiveItem> {
                 target: link.target.clone(),
             }),
             Block::Input(input) => Some(InteractiveItem::Input(input.clone())),
-            Block::Button(button) => Some(InteractiveItem::Button {
+            Block::Button(button) => Some(InteractiveItem::Button(ButtonAction {
                 id: button.id.clone(),
                 label: button.label.clone(),
                 target: button.target.clone(),
                 method: button.method,
                 confirm: button.confirm.clone(),
-            }),
+                auth: button.auth.clone(),
+            })),
             Block::Image(image) => Some(InteractiveItem::Image(image.clone())),
             _ => None,
         })
@@ -1213,7 +1222,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let document = parse_document(
-            "# Tools\n\n? q label=\"Query\" value=\"laksa\"\n! search label=\"Search\" method=\"POST\" target=\"/actions/search\" confirm=\"Submit search?\"\n",
+            "# Tools\n\n? q label=\"Query\" value=\"laksa\"\n! search label=\"Search\" method=\"POST\" target=\"/actions/search\" confirm=\"Submit search?\" auth=\"demo-search\"\n",
         )
         .unwrap();
         let mut page = LoadedPage {
@@ -1242,6 +1251,43 @@ mod tests {
         );
         assert_eq!(page.document.title(), Some("Search Results"));
         assert!(state.pending_confirmation.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_post_button_without_auth_token_renders_forbidden_and_skips_side_effect() {
+        let root = std::env::temp_dir().join(format!(
+            "jaringan-browser-action-auth-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let document = parse_document(
+            "# Tools\n\n? q label=\"Query\" value=\"laksa\"\n! search label=\"Search\" method=\"POST\" target=\"/actions/search\"\n",
+        )
+        .unwrap();
+        let mut page = LoadedPage {
+            location: PageLocation::File(root.join("tools.jrg")),
+            items: collect_items(&document),
+            document,
+            signature_status: SignatureStatus::Unsigned,
+        };
+        let mut state = BrowserState::new(page.location.clone());
+        state.selected = 1;
+
+        activate_selected(&mut state, &mut page).unwrap();
+
+        assert_eq!(
+            state.status,
+            "Submitted local POST action: /actions/search?q=laksa"
+        );
+        assert!(matches!(
+            page.document.blocks.first(),
+            Some(Block::Preformatted(body))
+                if body.contains("JRG/0.1 403 Forbidden")
+                    && body.contains("missing or invalid action capability token")
+        ));
+        assert!(!root.join(".jrg-actions.log").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

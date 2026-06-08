@@ -99,6 +99,7 @@ pub struct Button {
     pub target: String,
     pub method: ActionMethod,
     pub confirm: Option<String>,
+    pub auth: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -749,6 +750,7 @@ fn parse_button(line: &str) -> Option<Button> {
         .and_then(ActionMethod::parse)
         .unwrap_or(ActionMethod::Get);
     let confirm = parse_quoted_attr(attrs, "confirm");
+    let auth = parse_quoted_attr(attrs, "auth");
 
     Some(Button {
         id: id.to_owned(),
@@ -756,6 +758,7 @@ fn parse_button(line: &str) -> Option<Button> {
         target,
         method,
         confirm,
+        auth,
     })
 }
 
@@ -879,7 +882,8 @@ mod tests {
                     label: "Save this page".into(),
                     target: "save".into(),
                     method: ActionMethod::Get,
-                    confirm: None
+                    confirm: None,
+                    auth: None
                 }),
                 Block::Image(Image {
                     source: "./cover.png".into(),
@@ -892,7 +896,7 @@ mod tests {
     #[test]
     fn parses_structured_inputs_and_action_buttons() {
         let doc = parse_document(
-            "# Search\n\n? q label=\"Query\" value=\"laksa\" placeholder=\"Restaurant name\"\n! submit label=\"Search\" method=\"POST\" target=\"/actions/search\" confirm=\"Submit search?\"\n",
+            "# Search\n\n? q label=\"Query\" value=\"laksa\" placeholder=\"Restaurant name\"\n! submit label=\"Search\" method=\"POST\" target=\"/actions/search\" confirm=\"Submit search?\" auth=\"demo-search\"\n",
         )
         .unwrap();
 
@@ -914,7 +918,8 @@ mod tests {
                     label: "Search".into(),
                     target: "/actions/search".into(),
                     method: ActionMethod::Post,
-                    confirm: Some("Submit search?".into())
+                    confirm: Some("Submit search?".into()),
+                    auth: Some("demo-search".into())
                 })
             ]
         );

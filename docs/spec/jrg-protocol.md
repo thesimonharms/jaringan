@@ -73,12 +73,13 @@ Action POST request:
 ```text
 POST jrg://127.0.0.1:7070/actions/search JRG/0.1
 Host: 127.0.0.1:7070
+Action-Token: demo-search
 Content-Length: 7
 
 q=laksa
 ```
 
-The request target may be either a full `jrg://` URL or an absolute path when a `Host:` header is present.
+The request target may be either a full `jrg://` URL or an absolute path when a `Host:` header is present. `Action-Token:` is optional at the wire level, but side-effectful resolvers can require it before executing an action.
 
 Server response:
 
@@ -232,8 +233,9 @@ Query strings and fragments are accepted by the URL parser but ignored by the lo
 
 The prototype local resolver also includes one demo action endpoint for M4 experimentation:
 
-- `POST /actions/search` records `POST /actions/search <payload>` to `<root>/.jrg-actions.log`.
-- It returns a generated `text/jrg` search-results page echoing the submitted `q` field.
+- `POST /actions/search` requires `Action-Token: demo-search`, then records `POST /actions/search <payload>` to `<root>/.jrg-actions.log`.
+- Missing or invalid action tokens return `403 Forbidden` and do not write the side-effect log.
+- Authorized requests return a generated `text/jrg` search-results page echoing the submitted `q` field.
 
 ## Not in 0.1
 

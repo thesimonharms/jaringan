@@ -71,7 +71,7 @@ Examples:
 ### Buttons / actions
 
 ```text
-! id label="Button label" method="POST" target="action-or-target" confirm="Run this action?"
+! id label="Button label" method="POST" target="action-or-target" confirm="Run this action?" auth="capability-token"
 ```
 
 - Buttons are terminal-native controls and may represent side-effectful actions.
@@ -80,6 +80,7 @@ Examples:
 - `target` is optional and defaults to `id`.
 - `method` is optional and defaults to `GET`; supported values are `GET` and `POST`.
 - `confirm` is optional explicit confirmation copy.
+- `auth` is an optional action capability token. When present, the browser includes it in the action request so the resolver can authorize the side effect.
 - When `confirm` is present, the prototype browser requires pressing Enter twice: first to stage the action and display the confirmation prompt, then again to confirm it.
 - Confirmed `GET` actions are surfaced in browser status text with the collected form payload appended as query parameters.
 - Confirmed `POST` actions collect all current input values into a URL-encoded payload.
