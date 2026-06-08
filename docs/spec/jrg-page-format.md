@@ -65,7 +65,8 @@ Examples:
 - `label` is optional and defaults to `name`.
 - `value` is optional and defaults to an empty string.
 - `placeholder` is optional hint text for empty inputs.
-- The prototype browser renders inputs as selectable fields and shows their current value when activated. Editing is planned for a later M4 slice.
+- The prototype browser renders inputs as selectable fields.
+- When an input is selected, printable key presses append to the value and Backspace deletes the previous character.
 
 ### Buttons / actions
 
@@ -80,7 +81,10 @@ Examples:
 - `method` is optional and defaults to `GET`; supported values are `GET` and `POST`.
 - `confirm` is optional explicit confirmation copy.
 - When `confirm` is present, the prototype browser requires pressing Enter twice: first to stage the action and display the confirmation prompt, then again to confirm it.
-- Confirmed actions are surfaced in browser status text for now. Network POST execution and input editing are planned for later M4 slices.
+- Confirmed `GET` actions are surfaced in browser status text with the collected form payload appended as query parameters.
+- Confirmed `POST` actions collect all current input values into a URL-encoded payload.
+- Network `POST` actions send that payload over the TCP transport and render the returned page.
+- Local absolute `POST` targets such as `/actions/search` are handled by the prototype local resolver for demo side effects.
 
 ### Images
 

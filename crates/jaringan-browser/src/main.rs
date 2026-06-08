@@ -21,7 +21,7 @@ use jaringan_browser::{
 use jaringan_core::{ActionMethod, Block, Document, Image, Input, parse_document};
 use jaringan_protocol::{
     ContentType, JaringanUrl, LocalFileResolver, PageResolver, Request, Response, ResponseTag,
-    StatusCode, fetch_tcp, serve,
+    StatusCode, fetch_tcp, post_tcp, serve,
 };
 use jaringan_render::render_plain;
 use ratatui::{
@@ -86,6 +86,12 @@ enum InteractiveItem {
         confirm: Option<String>,
     },
     Image(Image),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InputEdit {
+    Append(char),
+    Backspace,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -197,6 +203,12 @@ fn run_app(
             match event::read()? {
                 Event::Key(key) => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Char(ch) if is_selected_input(&page, state.selected) => {
+                        edit_selected_input(&mut state, &mut page, InputEdit::Append(ch));
+                    }
+                    KeyCode::Backspace if is_selected_input(&page, state.selected) => {
+                        edit_selected_input(&mut state, &mut page, InputEdit::Backspace);
+                    }
                     KeyCode::Tab => toggle_mode(&mut state),
                     KeyCode::Char('s') => switch_mode(&mut state, BrowserMode::Scroll),
                     KeyCode::Char('v') => switch_mode(&mut state, BrowserMode::Selection),
@@ -263,7 +275,7 @@ fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage) -> anyhow:
             target,
             method,
             confirm,
-        } => activate_button(state, id, label, target, method, confirm),
+        } => activate_button(state, page, id, label, target, method, confirm)?,
         InteractiveItem::Input(input) => {
             state.pending_confirmation = None;
             state.status = input_status(&input);
@@ -279,12 +291,13 @@ fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage) -> anyhow:
 
 fn activate_button(
     state: &mut BrowserState,
+    page: &mut LoadedPage,
     id: String,
     label: String,
     target: String,
     method: ActionMethod,
     confirm: Option<String>,
-) {
+) -> anyhow::Result<()> {
     if let Some(prompt) = confirm {
         let already_confirmed = state
             .pending_confirmation
@@ -293,19 +306,120 @@ fn activate_button(
         if !already_confirmed {
             state.pending_confirmation = Some(ActionConfirmation { id, target });
             state.status = format!("{prompt} Press Enter again to confirm.");
-            return;
+            return Ok(());
         }
     }
 
     state.pending_confirmation = None;
-    state.status = match method {
-        ActionMethod::Get => format!("Confirmed GET action: {target}"),
-        ActionMethod::Post => format!("Confirmed POST action: {target}"),
-    };
+    let payload = input_payload(page);
+    let target_with_payload = target_with_payload(&target, &payload);
+
+    match (&page.location, method) {
+        (PageLocation::Network(current), ActionMethod::Post) => {
+            let action_url = current
+                .resolve(&target)
+                .with_context(|| format!("bad action target `{target}`"))?;
+            let response = post_tcp(&action_url, payload)?;
+            let document = document_from_response(&response)?;
+            navigate_to(state, PageLocation::Network(action_url));
+            state.status = format!("Submitted POST action: {target_with_payload}");
+            *page = LoadedPage {
+                location: state.current.clone(),
+                items: collect_items(&document),
+                document,
+            };
+        }
+        (PageLocation::File(current_file), ActionMethod::Post) if target.starts_with("/") => {
+            let root = current_file.parent().unwrap_or_else(|| Path::new("."));
+            let action_url = JaringanUrl::parse(&format!("jrg://localhost{target}"))?;
+            let resolver = LocalFileResolver::new(root);
+            let response = resolver.fetch(&Request::post(action_url, payload))?;
+            let document = document_from_response(&response)?;
+            state.status = format!("Submitted local POST action: {target_with_payload}");
+            *page = LoadedPage {
+                location: page.location.clone(),
+                items: collect_items(&document),
+                document,
+            };
+        }
+        _ => {
+            state.status = match method {
+                ActionMethod::Get => format!("Confirmed GET action: {target_with_payload}"),
+                ActionMethod::Post => format!("Confirmed POST action: {target_with_payload}"),
+            };
+        }
+    }
 
     if label.is_empty() {
         state.status.push_str(" (unnamed action)");
     }
+    Ok(())
+}
+
+fn is_selected_input(page: &LoadedPage, selected: usize) -> bool {
+    matches!(page.items.get(selected), Some(InteractiveItem::Input(_)))
+}
+
+fn edit_selected_input(state: &mut BrowserState, page: &mut LoadedPage, edit: InputEdit) {
+    let Some(InteractiveItem::Input(selected_input)) = page.items.get(state.selected) else {
+        return;
+    };
+    let selected_name = selected_input.name.clone();
+
+    for block in &mut page.document.blocks {
+        let Block::Input(input) = block else {
+            continue;
+        };
+        if input.name != selected_name {
+            continue;
+        }
+        match edit {
+            InputEdit::Append(ch) => input.value.push(ch),
+            InputEdit::Backspace => {
+                input.value.pop();
+            }
+        }
+        state.pending_confirmation = None;
+        state.status = format!("Updated {} = {}", input.name, input.value);
+        page.items = collect_items(&page.document);
+        return;
+    }
+}
+
+fn input_payload(page: &LoadedPage) -> String {
+    page.document
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Input(input) => Some(format!(
+                "{}={}",
+                percent_encode(&input.name),
+                percent_encode(&input.value)
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn target_with_payload(target: &str, payload: &str) -> String {
+    if payload.is_empty() {
+        return target.to_owned();
+    }
+    let separator = if target.contains('?') { '&' } else { '?' };
+    format!("{target}{separator}{payload}")
+}
+
+fn percent_encode(input: &str) -> String {
+    let mut output = String::new();
+    for byte in input.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            output.push(byte as char);
+        } else {
+            output.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    output
 }
 
 fn input_status(input: &Input) -> String {
@@ -791,12 +905,18 @@ mod tests {
 
     #[test]
     fn confirmed_post_button_requires_second_enter_before_action_runs() {
+        let root = std::env::temp_dir().join(format!(
+            "jaringan-browser-action-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
         let document = parse_document(
             "# Tools\n\n? q label=\"Query\" value=\"laksa\"\n! search label=\"Search\" method=\"POST\" target=\"/actions/search\" confirm=\"Submit search?\"\n",
         )
         .unwrap();
         let mut page = LoadedPage {
-            location: PageLocation::File(PathBuf::from("/tmp/tools.jrg")),
+            location: PageLocation::File(root.join("tools.jrg")),
             items: collect_items(&document),
             document,
         };
@@ -814,7 +934,36 @@ mod tests {
         );
 
         activate_selected(&mut state, &mut page).unwrap();
-        assert_eq!(state.status, "Confirmed POST action: /actions/search");
+        assert_eq!(
+            state.status,
+            "Submitted local POST action: /actions/search?q=laksa"
+        );
+        assert_eq!(page.document.title(), Some("Search Results"));
         assert!(state.pending_confirmation.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn edited_inputs_are_collected_into_action_payload() {
+        let document = parse_document(
+            "# Tools\n\n? q label=\"Query\" value=\"laksa\"\n! search label=\"Search\" method=\"POST\" target=\"/actions/search\"\n",
+        )
+        .unwrap();
+        let mut page = LoadedPage {
+            location: PageLocation::File(PathBuf::from("/tmp/tools.jrg")),
+            items: collect_items(&document),
+            document,
+        };
+        let mut state = BrowserState::new(page.location.clone());
+
+        for _ in 0..5 {
+            edit_selected_input(&mut state, &mut page, InputEdit::Backspace);
+        }
+        for ch in "nasi goreng".chars() {
+            edit_selected_input(&mut state, &mut page, InputEdit::Append(ch));
+        }
+
+        assert_eq!(input_payload(&page), "q=nasi%20goreng");
+        assert_eq!(state.status, "Updated q = nasi goreng");
     }
 }

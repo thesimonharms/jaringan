@@ -68,6 +68,16 @@ Host: 127.0.0.1:7070
 
 ```
 
+Action POST request:
+
+```text
+POST jrg://127.0.0.1:7070/actions/search JRG/0.1
+Host: 127.0.0.1:7070
+Content-Length: 7
+
+q=laksa
+```
+
 The request target may be either a full `jrg://` URL or an absolute path when a `Host:` header is present.
 
 Server response:
@@ -100,10 +110,14 @@ TCP clients use bounded connect/read/write timeouts so an unresponsive origin ca
 The in-process request model is currently:
 
 ```rust
-Request { url: JaringanUrl }
+Request {
+    method: RequestMethod,
+    url: JaringanUrl,
+    body: String,
+}
 ```
 
-Future network transports can add method, agent hints, accepted render capabilities, cache validators, and authentication without changing page syntax.
+Supported request methods are `GET` and `POST`. `POST` bodies use URL-encoded form payloads in the prototype. Future network transports can add agent hints, accepted render capabilities, cache validators, and authentication without changing page syntax.
 
 ## Response
 
@@ -164,6 +178,11 @@ The prototype terminal browser follows redirect tags automatically for `jrg://` 
 - `/foo` -> `404 Not Found`
 
 Query strings and fragments are accepted by the URL parser but ignored by the local file mapping.
+
+The prototype local resolver also includes one demo action endpoint for M4 experimentation:
+
+- `POST /actions/search` records `POST /actions/search <payload>` to `<root>/.jrg-actions.log`.
+- It returns a generated `text/jrg` search-results page echoing the submitted `q` field.
 
 ## Not in 0.1
 

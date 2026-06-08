@@ -27,7 +27,7 @@ Preformatted content keeps spacing.
 ! action-id label="Do thing" method="POST" target="/actions/do-thing"
 ```
 
-Current parser support includes headings, paragraphs, links (`=> target label`), structured inputs (`? name ...`), action buttons (`! id ...` with `method`/`confirm`), images, preformatted blocks, and trailing metadata after `~~~~~`. M4 currently renders inputs/actions and enforces explicit two-step confirmation for confirmed actions; network POST execution comes next.
+Current parser support includes headings, paragraphs, links (`=> target label`), structured inputs (`? name ...`), action buttons (`! id ...` with `method`/`confirm`), images, preformatted blocks, and trailing metadata after `~~~~~`. M4 renders editable inputs/actions, enforces explicit two-step confirmation for confirmed actions, collects URL-encoded form payloads, and executes prototype POST actions over network or local demo resolvers.
 
 ## Crate responsibilities
 
@@ -39,6 +39,7 @@ Owns the stable data model:
 - `Block`
 - `Link`
 - `Button`
+- `Input`
 - `Image`
 - parser/serializer for the text-first page format
 
@@ -73,6 +74,7 @@ Application shell:
 - browser-side redirect following and network error pages
 - bounded TCP client timeouts and `get --follow`
 - selection/scroll interaction state
+- editable form inputs and confirmed POST action submission
 
 ## Specs
 
@@ -85,5 +87,5 @@ Application shell:
 2. **M1 file browser:** open local `.jrg` pages, navigate links between local files, maintain history.
 3. **M2 protocol contract:** define `jrg://` URL/path semantics, page metadata, status codes, response tags, and resolver abstraction.
 4. **M3 protocol server/client:** serve, fetch, browse `jrg://` pages over TCP, follow redirect tags in the browser/CLI, display network error pages, and use bounded client timeouts, then harden toward TLS/discovery.
-5. **M4 actions/forms:** structured inputs and action buttons with explicit two-step confirmation; later slices add input editing and network POST execution.
+5. **M4 actions/forms:** structured/editable inputs, action buttons with explicit two-step confirmation, URL-encoded payload collection, TCP POST action submission, and a local demo action handler.
 6. **M5 crawler/search:** index page titles, headings, links, and metadata.

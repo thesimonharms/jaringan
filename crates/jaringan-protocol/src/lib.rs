@@ -94,14 +94,51 @@ pub enum UrlError {
     MissingHost,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestMethod {
+    Get,
+    Post,
+}
+
+impl RequestMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+        }
+    }
+
+    fn parse(input: &str) -> Option<Self> {
+        match input {
+            "GET" => Some(Self::Get),
+            "POST" => Some(Self::Post),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
+    pub method: RequestMethod,
     pub url: JaringanUrl,
+    pub body: String,
 }
 
 impl Request {
     pub fn new(url: JaringanUrl) -> Self {
-        Self { url }
+        Self {
+            method: RequestMethod::Get,
+            url,
+            body: String::new(),
+        }
+    }
+
+    pub fn post(url: JaringanUrl, body: impl Into<String>) -> Self {
+        Self {
+            method: RequestMethod::Post,
+            url,
+            body: body.into(),
+        }
     }
 }
 
@@ -290,10 +327,72 @@ impl LocalFileResolver {
 
         Some(self.root.join(relative))
     }
+
+    fn handle_demo_search_action(&self, request: &Request) -> Result<Response, ResolveError> {
+        fs::create_dir_all(&self.root).map_err(|source| ResolveError::Write {
+            path: self.root.clone(),
+            source,
+        })?;
+        let log_path = self.root.join(".jrg-actions.log");
+        let mut log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|source| ResolveError::Write {
+                path: log_path.clone(),
+                source,
+            })?;
+        writeln!(log, "POST {} {}", request.url.path(), request.body).map_err(|source| {
+            ResolveError::Write {
+                path: log_path.clone(),
+                source,
+            }
+        })?;
+
+        let query = form_value(&request.body, "q").unwrap_or_default();
+        Ok(Response::page(
+            StatusCode::Ok,
+            format!(
+                "# Search Results\n\nDemo action received query: {query}\n\n=> /action-form.jrg Back to form\n"
+            ),
+        ))
+    }
+}
+
+fn form_value(body: &str, key: &str) -> Option<String> {
+    body.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        (name == key).then(|| percent_decode(value))
+    })
+}
+
+fn percent_decode(input: &str) -> String {
+    let mut output = Vec::new();
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let decoded = std::str::from_utf8(&bytes[index + 1..index + 3])
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+            if let Some(value) = decoded {
+                output.push(value);
+                index += 3;
+                continue;
+            }
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).into_owned()
 }
 
 impl PageResolver for LocalFileResolver {
     fn fetch(&self, request: &Request) -> Result<Response, ResolveError> {
+        if request.method == RequestMethod::Post && request.url.path() == "/actions/search" {
+            return self.handle_demo_search_action(request);
+        }
+
         let Some(path) = self.resolve_path(&request.url) else {
             return Ok(Response::text(
                 StatusCode::NotFound,
@@ -319,6 +418,8 @@ impl PageResolver for LocalFileResolver {
 pub enum ResolveError {
     #[error("failed to read {}: {source}", path.display())]
     Read { path: PathBuf, source: io::Error },
+    #[error("failed to write {}: {source}", path.display())]
+    Write { path: PathBuf, source: io::Error },
 }
 
 pub fn serve(listener: TcpListener, resolver: impl PageResolver) -> Result<(), WireError> {
@@ -344,15 +445,32 @@ pub fn fetch_tcp(url: &JaringanUrl) -> Result<Response, WireError> {
     fetch_tcp_with_timeout(url, Duration::from_secs(5))
 }
 
+pub fn post_tcp(url: &JaringanUrl, body: String) -> Result<Response, WireError> {
+    send_tcp_with_timeout(Request::post(url.clone(), body), Duration::from_secs(5))
+}
+
 pub fn fetch_tcp_with_timeout(url: &JaringanUrl, timeout: Duration) -> Result<Response, WireError> {
-    let mut addrs = (url.host(), url.port_or_default()).to_socket_addrs()?;
+    send_tcp_with_timeout(Request::new(url.clone()), timeout)
+}
+
+fn send_tcp_with_timeout(request: Request, timeout: Duration) -> Result<Response, WireError> {
+    let mut addrs = (request.url.host(), request.url.port_or_default()).to_socket_addrs()?;
     let addr = addrs.next().ok_or(WireError::BadAddress)?;
     let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
-    writeln!(stream, "GET {} JRG/0.1", url.as_str())?;
-    writeln!(stream, "Host: {}", url.authority())?;
+    writeln!(
+        stream,
+        "{} {} JRG/0.1",
+        request.method.as_str(),
+        request.url.as_str()
+    )?;
+    writeln!(stream, "Host: {}", request.url.authority())?;
+    if !request.body.is_empty() {
+        writeln!(stream, "Content-Length: {}", request.body.len())?;
+    }
     writeln!(stream)?;
+    write!(stream, "{}", request.body)?;
     stream.flush()?;
     read_response(&mut stream)
 }
@@ -362,13 +480,12 @@ fn read_wire_request(stream: &mut TcpStream) -> Result<Request, WireError> {
     let mut first_line = String::new();
     reader.read_line(&mut first_line)?;
     let mut parts = first_line.split_whitespace();
-    let method = parts.next().ok_or(WireError::BadRequest)?;
+    let method = RequestMethod::parse(parts.next().ok_or(WireError::BadRequest)?)
+        .ok_or(WireError::BadRequest)?;
     let target = parts.next().ok_or(WireError::BadRequest)?;
-    if method != "GET" {
-        return Err(WireError::BadRequest);
-    }
 
     let mut host = String::new();
+    let mut content_length = 0usize;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
@@ -380,6 +497,8 @@ fn read_wire_request(stream: &mut TcpStream) -> Result<Request, WireError> {
         }
         if let Some(value) = trimmed.strip_prefix("Host:") {
             host = value.trim().to_owned();
+        } else if let Some(value) = trimmed.strip_prefix("Content-Length:") {
+            content_length = value.trim().parse().map_err(|_| WireError::BadRequest)?;
         }
     }
 
@@ -391,7 +510,11 @@ fn read_wire_request(stream: &mut TcpStream) -> Result<Request, WireError> {
         return Err(WireError::BadRequest);
     };
 
-    Ok(Request::new(url))
+    let mut body = vec![0; content_length];
+    reader.read_exact(&mut body)?;
+    let body = String::from_utf8(body).map_err(|_| WireError::BadRequest)?;
+
+    Ok(Request { method, url, body })
 }
 
 pub fn write_response(writer: &mut impl Write, response: &Response) -> io::Result<()> {
@@ -605,5 +728,59 @@ mod tests {
         assert!(
             matches!(error, WireError::Io(error) if error.kind() == io::ErrorKind::WouldBlock || error.kind() == io::ErrorKind::TimedOut)
         );
+    }
+
+    #[derive(Clone)]
+    struct EchoPostResolver;
+
+    impl PageResolver for EchoPostResolver {
+        fn fetch(&self, request: &Request) -> Result<Response, ResolveError> {
+            assert_eq!(request.method, RequestMethod::Post);
+            assert_eq!(request.url.path(), "/actions/search");
+            assert_eq!(request.body, "q=laksa");
+            Ok(Response::page(StatusCode::Ok, "# Action received\n"))
+        }
+    }
+
+    #[test]
+    fn tcp_client_posts_action_payload_to_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || serve_one(listener, EchoPostResolver).unwrap());
+
+        let response = post_tcp(
+            &JaringanUrl::parse(&format!("jrg://{addr}/actions/search")).unwrap(),
+            "q=laksa".to_owned(),
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(response.status, StatusCode::Ok);
+        assert_eq!(response.body, "# Action received\n");
+    }
+
+    #[test]
+    fn local_resolver_handles_demo_search_action_and_records_side_effect() {
+        let root =
+            std::env::temp_dir().join(format!("jaringan-action-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let resolver = LocalFileResolver::new(&root);
+
+        let response = resolver
+            .fetch(&Request::post(
+                JaringanUrl::parse("jrg://localhost/actions/search").unwrap(),
+                "q=laksa".to_owned(),
+            ))
+            .unwrap();
+
+        assert_eq!(response.status, StatusCode::Ok);
+        assert!(response.body.contains("# Search Results"));
+        assert!(response.body.contains("laksa"));
+        assert_eq!(
+            fs::read_to_string(root.join(".jrg-actions.log")).unwrap(),
+            "POST /actions/search q=laksa\n"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }
