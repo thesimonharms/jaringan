@@ -117,12 +117,14 @@ pub struct SearchEntry {
     pub headings: Vec<String>,
     pub links: Vec<SearchLink>,
     pub metadata: Option<String>,
+    pub body: String,
 }
 
 impl SearchEntry {
     pub fn from_document(url: impl Into<String>, document: &Document) -> Self {
         let mut headings = Vec::new();
         let mut links = Vec::new();
+        let mut body_parts = Vec::new();
         for block in &document.blocks {
             match block {
                 Block::Heading { text, .. } => headings.push(text.clone()),
@@ -130,7 +132,10 @@ impl SearchEntry {
                     target: link.target.clone(),
                     label: link.label.clone(),
                 }),
-                _ => {}
+                Block::Paragraph(text) | Block::Preformatted(text) => body_parts.push(text.clone()),
+                Block::Input(input) => body_parts.push(format!("{} {}", input.label, input.value)),
+                Block::Button(button) => body_parts.push(button.label.clone()),
+                Block::Image(image) => body_parts.push(image.alt.clone()),
             }
         }
         let title = document.title().unwrap_or("Untitled").to_owned();
@@ -140,6 +145,7 @@ impl SearchEntry {
             headings,
             links,
             metadata: document.metadata.clone(),
+            body: body_parts.join("\n"),
         }
     }
 
@@ -155,6 +161,7 @@ impl SearchEntry {
             &self.headings.join(" "),
             &link_text,
             self.metadata.as_deref().unwrap_or_default(),
+            &self.body,
         ]
         .join(" ")
     }
@@ -182,14 +189,14 @@ impl SearchIndex {
     }
 
     pub fn search(&self, query: &str) -> Vec<SearchResult<'_>> {
-        let query = query.trim().to_ascii_lowercase();
-        if query.is_empty() {
+        let tokens = query_tokens(query);
+        if tokens.is_empty() {
             return Vec::new();
         }
         let mut results = self
             .entries
             .iter()
-            .filter_map(|entry| score_entry(entry, &query))
+            .filter_map(|entry| score_entry(entry, &tokens))
             .collect::<Vec<_>>();
         results.sort_by(|left, right| {
             right
@@ -200,49 +207,230 @@ impl SearchIndex {
         });
         results
     }
+
+    pub fn to_index_text(&self) -> String {
+        let mut output = String::from("JRG-SEARCH/0.1\n");
+        for entry in &self.entries {
+            let headings = entry
+                .headings
+                .iter()
+                .map(|heading| escape_index_field(heading))
+                .collect::<Vec<_>>()
+                .join("\u{1f}");
+            let links = entry
+                .links
+                .iter()
+                .map(|link| {
+                    format!(
+                        "{}\u{1e}{}",
+                        escape_index_field(&link.target),
+                        escape_index_field(&link.label)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\u{1f}");
+            output.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\n",
+                escape_index_field(&entry.url),
+                escape_index_field(&entry.title),
+                headings,
+                links,
+                entry
+                    .metadata
+                    .as_ref()
+                    .map(|metadata| escape_index_field(metadata))
+                    .unwrap_or_default(),
+                escape_index_field(&entry.body)
+            ));
+        }
+        output
+    }
+
+    pub fn from_index_text(input: &str) -> Result<Self, String> {
+        let mut lines = input.lines();
+        match lines.next() {
+            Some("JRG-SEARCH/0.1") => {}
+            Some(other) => return Err(format!("unsupported search index header: {other}")),
+            None => return Err(String::from("empty search index")),
+        }
+
+        let mut index = SearchIndex::default();
+        for (line_number, line) in lines.enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields = line.split('\t').collect::<Vec<_>>();
+            if fields.len() != 6 {
+                return Err(format!(
+                    "bad search index entry at line {}: expected 6 fields",
+                    line_number + 2
+                ));
+            }
+            let headings = split_escaped_list(fields[2], '\u{1f}')?;
+            let links = if fields[3].is_empty() {
+                Vec::new()
+            } else {
+                fields[3]
+                    .split('\u{1f}')
+                    .map(|link| {
+                        let (target, label) = link
+                            .split_once('\u{1e}')
+                            .ok_or_else(|| format!("bad link field at line {}", line_number + 2))?;
+                        Ok(SearchLink {
+                            target: unescape_index_field(target)?,
+                            label: unescape_index_field(label)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?
+            };
+            index.add(SearchEntry {
+                url: unescape_index_field(fields[0])?,
+                title: unescape_index_field(fields[1])?,
+                headings,
+                links,
+                metadata: (!fields[4].is_empty())
+                    .then(|| unescape_index_field(fields[4]))
+                    .transpose()?,
+                body: unescape_index_field(fields[5])?,
+            });
+        }
+        Ok(index)
+    }
 }
 
-fn score_entry<'a>(entry: &'a SearchEntry, query: &str) -> Option<SearchResult<'a>> {
+fn score_entry<'a>(entry: &'a SearchEntry, tokens: &[String]) -> Option<SearchResult<'a>> {
     let mut score = 0;
     let mut snippet = None;
-    if entry.title.to_ascii_lowercase().contains(query) {
-        score += 10;
-        snippet = Some(entry.title.clone());
-    }
-    for heading in &entry.headings {
-        if heading.to_ascii_lowercase().contains(query) {
-            score += 5;
-            snippet.get_or_insert_with(|| heading.clone());
-        }
-    }
+    score += score_field(&entry.title, tokens, 10, &mut snippet);
+    score += score_fields(&entry.headings, tokens, 5, &mut snippet);
     for link in &entry.links {
-        if link.label.to_ascii_lowercase().contains(query)
-            || link.target.to_ascii_lowercase().contains(query)
-        {
-            score += 3;
-            snippet.get_or_insert_with(|| link.label.clone());
-        }
+        score += score_field(&link.label, tokens, 3, &mut snippet);
+        score += score_field(&link.target, tokens, 3, &mut snippet);
     }
-    if entry
-        .metadata
-        .as_ref()
-        .is_some_and(|metadata| metadata.to_ascii_lowercase().contains(query))
-    {
-        score += 1;
-        snippet.get_or_insert_with(|| {
-            entry
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.lines().next())
-                .unwrap_or_default()
-                .to_owned()
-        });
+    if let Some(metadata) = &entry.metadata {
+        score += score_multiline_field(metadata, tokens, 1, &mut snippet);
     }
+    score += score_multiline_field(&entry.body, tokens, 1, &mut snippet);
     (score > 0).then(|| SearchResult {
         entry,
         score,
         snippet: snippet.unwrap_or_else(|| entry.title.clone()),
     })
+}
+
+fn score_fields(
+    fields: &[String],
+    tokens: &[String],
+    weight: usize,
+    snippet: &mut Option<String>,
+) -> usize {
+    fields
+        .iter()
+        .map(|field| score_field(field, tokens, weight, snippet))
+        .sum()
+}
+
+fn score_multiline_field(
+    field: &str,
+    tokens: &[String],
+    weight: usize,
+    snippet: &mut Option<String>,
+) -> usize {
+    field
+        .lines()
+        .flat_map(sentence_snippets)
+        .map(|line| score_field(&line, tokens, weight, snippet))
+        .sum()
+}
+
+fn sentence_snippets(line: &str) -> Vec<String> {
+    let mut snippets = Vec::new();
+    let mut start = 0usize;
+    for (index, _) in line.match_indices(". ") {
+        let end = index + 1;
+        let snippet = line[start..end].trim();
+        if !snippet.is_empty() {
+            snippets.push(snippet.to_owned());
+        }
+        start = index + 2;
+    }
+    let tail = line[start..].trim();
+    if !tail.is_empty() {
+        snippets.push(tail.to_owned());
+    }
+    snippets
+}
+
+fn score_field(
+    field: &str,
+    tokens: &[String],
+    weight: usize,
+    snippet: &mut Option<String>,
+) -> usize {
+    let haystack = field.to_ascii_lowercase();
+    if tokens.iter().all(|token| haystack.contains(token)) {
+        snippet.get_or_insert_with(|| field.to_owned());
+        tokens.len() * weight
+    } else {
+        0
+    }
+}
+
+fn query_tokens(query: &str) -> Vec<String> {
+    query
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
+fn split_escaped_list(input: &str, separator: char) -> Result<Vec<String>, String> {
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
+    input.split(separator).map(unescape_index_field).collect()
+}
+
+fn escape_index_field(input: &str) -> String {
+    let mut escaped = String::new();
+    for ch in input.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{1f}' => escaped.push_str("\\u001f"),
+            '\u{1e}' => escaped.push_str("\\u001e"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn unescape_index_field(input: &str) -> Result<String, String> {
+    let mut output = String::new();
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => output.push('\n'),
+            Some('t') => output.push('\t'),
+            Some('\\') => output.push('\\'),
+            Some('u') => {
+                let code = chars.by_ref().take(4).collect::<String>();
+                match code.as_str() {
+                    "001f" => output.push('\u{1f}'),
+                    "001e" => output.push('\u{1e}'),
+                    _ => return Err(format!("unsupported escape: \\u{code}")),
+                }
+            }
+            Some(other) => return Err(format!("unsupported escape: \\{other}")),
+            None => return Err(String::from("trailing escape in search index field")),
+        }
+    }
+    Ok(output)
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -645,6 +833,7 @@ mod tests {
             headings: vec!["Hawker guide".into()],
             links: Vec::new(),
             metadata: None,
+            body: String::new(),
         });
         index.add(SearchEntry {
             url: "jrg://local/coffee.jrg".into(),
@@ -652,6 +841,7 @@ mod tests {
             headings: vec!["Laksa nearby".into()],
             links: Vec::new(),
             metadata: Some("tags: cafe".into()),
+            body: String::new(),
         });
 
         let results = index.search("laksa");
@@ -660,5 +850,49 @@ mod tests {
         assert_eq!(results[0].entry.url, "jrg://local/penang.jrg");
         assert!(results[0].score > results[1].score);
         assert_eq!(results[0].snippet, "Penang Laksa");
+    }
+
+    #[test]
+    fn search_requires_all_query_tokens_and_snippets_matching_body_text() {
+        let document = parse_document(
+            "# Food notes\n\nThe best evening laksa stall is beside the blue market.\nCoffee appears elsewhere.\n",
+        )
+        .unwrap();
+        let mut index = SearchIndex::default();
+        index.add(SearchEntry::from_document(
+            "jrg://local/food.jrg",
+            &document,
+        ));
+
+        assert!(index.search("laksa satay").is_empty());
+        let results = index.search("evening laksa");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].snippet,
+            "The best evening laksa stall is beside the blue market."
+        );
+    }
+
+    #[test]
+    fn search_index_serializes_and_loads_from_text() {
+        let mut index = SearchIndex::default();
+        index.add(SearchEntry {
+            url: "jrg://local/penang.jrg".into(),
+            title: "Penang Laksa".into(),
+            headings: vec!["Hawker guide".into()],
+            links: vec![SearchLink {
+                target: "../index.jrg".into(),
+                label: "Back home".into(),
+            }],
+            metadata: Some("tags: laksa, hawker".into()),
+            body: "A body with tabs\tand newlines\ninside.".into(),
+        });
+
+        let encoded = index.to_index_text();
+        let decoded = SearchIndex::from_index_text(&encoded).unwrap();
+
+        assert_eq!(decoded.entries(), index.entries());
+        assert_eq!(decoded.search("hawker")[0].entry.title, "Penang Laksa");
     }
 }

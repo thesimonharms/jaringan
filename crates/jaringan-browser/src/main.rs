@@ -63,9 +63,20 @@ enum Command {
         bind: String,
     },
     /// Print a local search index of all .jrg pages under a root.
-    Index { root: PathBuf },
+    Index {
+        root: PathBuf,
+        /// Persist the generated index to this file.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Search local .jrg pages under a root.
-    Search { root: PathBuf, query: String },
+    Search {
+        root: PathBuf,
+        query: String,
+        /// Load an existing persisted index instead of crawling the root.
+        #[arg(long)]
+        index: Option<PathBuf>,
+    },
     /// Open a local path or jrg:// URL in the interactive terminal browser.
     Open { target: String },
 }
@@ -132,14 +143,20 @@ fn main() -> anyhow::Result<()> {
             eprintln!("serving {} at jrg://{bind}/", root.display());
             serve(listener, LocalFileResolver::new(root))?;
         }
-        Command::Index { root } => {
+        Command::Index { root, output } => {
             let index = build_local_search_index(&root)?;
+            if let Some(path) = output {
+                save_search_index(&index, &path)?;
+            }
             for entry in index.entries() {
                 println!("{}\t{}", entry.url, entry.title);
             }
         }
-        Command::Search { root, query } => {
-            let index = build_local_search_index(&root)?;
+        Command::Search { root, query, index } => {
+            let index = match index {
+                Some(path) => load_search_index(&path)?,
+                None => build_local_search_index(&root)?,
+            };
             for result in index.search(&query) {
                 println!(
                     "{}\t{}\t{}\t{}",
@@ -174,6 +191,23 @@ fn build_local_search_index(root: &Path) -> anyhow::Result<SearchIndex> {
     let mut index = SearchIndex::default();
     collect_search_entries(&root, &root, &mut index)?;
     Ok(index)
+}
+
+fn save_search_index(index: &SearchIndex, path: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(path, index.to_index_text())
+        .with_context(|| format!("failed to write search index {}", path.display()))
+}
+
+fn load_search_index(path: &Path) -> anyhow::Result<SearchIndex> {
+    let source = fs::read_to_string(path)
+        .with_context(|| format!("failed to read search index {}", path.display()))?;
+    SearchIndex::from_index_text(&source)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| format!("failed to parse search index {}", path.display()))
 }
 
 fn collect_search_entries(
@@ -409,6 +443,18 @@ fn activate_button(
                 document,
             };
         }
+        (PageLocation::File(current_file), ActionMethod::Get) if target == "/search" => {
+            let root = current_file.parent().unwrap_or_else(|| Path::new("."));
+            let query = payload_value(&payload, "q").unwrap_or_default();
+            let index = build_local_search_index(root)?;
+            let document = local_search_results_document(&index, &query);
+            state.status = format!("Searched local index for: {query}");
+            *page = LoadedPage {
+                location: page.location.clone(),
+                items: collect_items(&document),
+                document,
+            };
+        }
         _ => {
             state.status = match method {
                 ActionMethod::Get => format!("Confirmed GET action: {target_with_payload}"),
@@ -475,6 +521,57 @@ fn target_with_payload(target: &str, payload: &str) -> String {
     }
     let separator = if target.contains('?') { '&' } else { '?' };
     format!("{target}{separator}{payload}")
+}
+
+fn payload_value(payload: &str, name: &str) -> Option<String> {
+    payload.split('&').find_map(|part| {
+        let (key, value) = part.split_once('=')?;
+        (percent_decode(key) == name).then(|| percent_decode(value))
+    })
+}
+
+fn percent_decode(input: &str) -> String {
+    let mut output = Vec::new();
+    let bytes = input.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let decoded = std::str::from_utf8(&bytes[index + 1..index + 3])
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+            if let Some(value) = decoded {
+                output.push(value);
+                index += 3;
+                continue;
+            }
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn local_search_results_document(index: &SearchIndex, query: &str) -> Document {
+    let mut blocks = vec![Block::Heading {
+        level: 1,
+        text: format!("Search results for {query}"),
+    }];
+    let results = index.search(query);
+    if results.is_empty() {
+        blocks.push(Block::Paragraph(String::from("No results found.")));
+    } else {
+        for result in results {
+            blocks.push(Block::Link(jaringan_core::Link {
+                target: local_result_target(&result.entry.url),
+                label: format!("{} — {}", result.entry.title, result.snippet),
+            }));
+        }
+    }
+    Document::new(blocks)
+}
+
+fn local_result_target(url: &str) -> String {
+    url.strip_prefix("jrg://local/").unwrap_or(url).to_owned()
 }
 
 fn percent_encode(input: &str) -> String {
@@ -1033,7 +1130,6 @@ mod tests {
         assert_eq!(input_payload(&page), "q=nasi%20goreng");
         assert_eq!(state.status, "Updated q = nasi goreng");
     }
-
     #[test]
     fn local_search_index_discovers_nested_jrg_pages() {
         let root =
@@ -1058,6 +1154,64 @@ mod tests {
         assert_eq!(index.entries().len(), 2);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].entry.url, "jrg://local/food/laksa.jrg");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn persisted_search_index_can_be_loaded_for_queries() {
+        let root = std::env::temp_dir().join(format!(
+            "jaringan-persisted-search-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("index.jrg"),
+            "# Home\n\nAn evening laksa notebook.\n\n~~~~~\ntitle: Food Home\n",
+        )
+        .unwrap();
+        let index_path = root.join(".jrg-search-index");
+
+        let index = build_local_search_index(&root).unwrap();
+        save_search_index(&index, &index_path).unwrap();
+        let loaded = load_search_index(&index_path).unwrap();
+
+        assert_eq!(loaded.entries(), index.entries());
+        assert_eq!(
+            loaded.search("evening laksa")[0].entry.url,
+            "jrg://local/index.jrg"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_get_search_action_replaces_page_with_selectable_results() {
+        let root =
+            std::env::temp_dir().join(format!("jaringan-tui-search-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("home.jrg"),
+            "# Home\n\n? q label=\"Search\" value=\"laksa\"\n! find label=\"Find\" method=\"GET\" target=\"/search\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("food.jrg"), "# Food\n\nEvening laksa guide.\n").unwrap();
+        let document = parse_document(&fs::read_to_string(root.join("home.jrg")).unwrap()).unwrap();
+        let mut page = LoadedPage {
+            location: PageLocation::File(root.join("home.jrg")),
+            items: collect_items(&document),
+            document,
+        };
+        let mut state = BrowserState::new(page.location.clone());
+        state.selected = 1;
+
+        activate_selected(&mut state, &mut page).unwrap();
+
+        assert_eq!(page.document.title(), Some("Search results for laksa"));
+        assert_eq!(state.status, "Searched local index for: laksa");
+        assert!(
+            matches!(page.items.first(), Some(InteractiveItem::Link { target, .. }) if target == "food.jrg")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

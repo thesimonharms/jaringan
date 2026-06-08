@@ -52,12 +52,15 @@ cargo run -p jaringan-browser -- serve docs/examples --bind 127.0.0.1:7070
 cargo run -p jaringan-browser -- get jrg://127.0.0.1:7070/
 cargo run -p jaringan-browser -- get --follow jrg://127.0.0.1:7070/
 cargo run -p jaringan-browser -- index docs/examples
+cargo run -p jaringan-browser -- index docs/examples --output /tmp/docs.jrgidx
 cargo run -p jaringan-browser -- search docs/examples action
+cargo run -p jaringan-browser -- search docs/examples action --index /tmp/docs.jrgidx
 cargo run -p jaringan-browser -- open jrg://127.0.0.1:7070/
 cargo run -p jaringan-browser -- open docs/examples/hello.jrg
+cargo run -p jaringan-browser -- open docs/examples/search-form.jrg
 ```
 
-Use `sample` for plain-text output, `fetch` for local protocol-path resolution, `serve`/`get` for TCP transport, `get --follow` for non-interactive redirect following, `index`/`search` for local M5 crawl/search experiments, and `open` for the interactive ratatui browser over local files or TCP `jrg://` pages. M4 form/action syntax uses `? name ...` inputs and `! id ... method="POST" confirm="..."` buttons. Inputs can be edited in the browser; confirmed POST actions collect URL-encoded input values and submit them to network or demo local action endpoints.
+Use `sample` for plain-text output, `fetch` for local protocol-path resolution, `serve`/`get` for TCP transport, `get --follow` for non-interactive redirect following, `index`/`search` for local M5 crawl/search experiments, and `open` for the interactive ratatui browser over local files or TCP `jrg://` pages. `index --output` persists a reusable `.jrgidx` search index, and `search --index` queries that index instead of crawling. M4/M5 form syntax uses `? name ...` inputs and `! id ...` buttons. Inputs can be edited in the browser; confirmed POST actions submit URL-encoded values, and local GET `/search` actions render selectable search results in the TUI.
 
 Specs:
 

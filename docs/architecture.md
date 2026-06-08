@@ -44,6 +44,7 @@ Owns the stable data model:
 - `SearchEntry` / `SearchIndex`
 - parser/serializer for the text-first page format
 - title/heading/link/metadata extraction for local search
+- tokenized local search, snippets, and prototype index text serialization
 
 ### `jaringan-protocol`
 
@@ -78,6 +79,7 @@ Application shell:
 - selection/scroll interaction state
 - editable form inputs and confirmed POST action submission
 - local `index`/`search` commands for M5 crawl/search experiments
+- persisted `.jrgidx` files and local GET `/search` result pages in the TUI
 
 ## Specs
 
@@ -92,4 +94,4 @@ Application shell:
 3. **M2 protocol contract:** define `jrg://` URL/path semantics, page metadata, status codes, response tags, and resolver abstraction.
 4. **M3 protocol server/client:** serve, fetch, browse `jrg://` pages over TCP, follow redirect tags in the browser/CLI, display network error pages, and use bounded client timeouts, then harden toward TLS/discovery.
 5. **M4 actions/forms:** structured/editable inputs, action buttons with explicit two-step confirmation, URL-encoded payload collection, TCP POST action submission, and a local demo action handler.
-6. **M5 crawler/search:** index page titles, headings, links, and metadata; crawl local `.jrg` roots and query the resulting search index.
+6. **M5 crawler/search:** index page titles, headings, links, metadata, and body text; crawl local `.jrg` roots, query/persist the resulting search index, and expose local TUI search result pages.

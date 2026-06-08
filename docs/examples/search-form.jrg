@@ -1,0 +1,10 @@
+# M5 local search
+
+Edit the query, then press Find to search this local document root.
+
+? q label="Search query" value="action" placeholder="Search docs"
+! find label="Find" method="GET" target="/search"
+
+~~~~~
+title: M5 local search form
+tags: search, m5, tui
