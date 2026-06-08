@@ -18,7 +18,9 @@ use jaringan_browser::{
     navigate_to, resolve_target, scroll_down, scroll_up, selection_down, selection_up, switch_mode,
     toggle_mode,
 };
-use jaringan_core::{ActionMethod, Block, Document, Image, Input, parse_document};
+use jaringan_core::{
+    ActionMethod, Block, Document, Image, Input, SearchEntry, SearchIndex, parse_document,
+};
 use jaringan_protocol::{
     ContentType, JaringanUrl, LocalFileResolver, PageResolver, Request, Response, ResponseTag,
     StatusCode, fetch_tcp, post_tcp, serve,
@@ -60,6 +62,10 @@ enum Command {
         #[arg(long, default_value = "127.0.0.1:7070")]
         bind: String,
     },
+    /// Print a local search index of all .jrg pages under a root.
+    Index { root: PathBuf },
+    /// Search local .jrg pages under a root.
+    Search { root: PathBuf, query: String },
     /// Open a local path or jrg:// URL in the interactive terminal browser.
     Open { target: String },
 }
@@ -126,6 +132,21 @@ fn main() -> anyhow::Result<()> {
             eprintln!("serving {} at jrg://{bind}/", root.display());
             serve(listener, LocalFileResolver::new(root))?;
         }
+        Command::Index { root } => {
+            let index = build_local_search_index(&root)?;
+            for entry in index.entries() {
+                println!("{}\t{}", entry.url, entry.title);
+            }
+        }
+        Command::Search { root, query } => {
+            let index = build_local_search_index(&root)?;
+            for result in index.search(&query) {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    result.score, result.entry.url, result.entry.title, result.snippet
+                );
+            }
+        }
         Command::Open { target } => run_tui(target)?,
     }
 
@@ -146,6 +167,52 @@ fn print_response(response: Response) {
     }
     println!();
     print!("{}", response.body);
+}
+
+fn build_local_search_index(root: &Path) -> anyhow::Result<SearchIndex> {
+    let root = canonicalish(root);
+    let mut index = SearchIndex::default();
+    collect_search_entries(&root, &root, &mut index)?;
+    Ok(index)
+}
+
+fn collect_search_entries(
+    root: &Path,
+    current: &Path,
+    index: &mut SearchIndex,
+) -> anyhow::Result<()> {
+    let mut entries = fs::read_dir(current)
+        .with_context(|| format!("failed to read directory {}", current.display()))?
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_search_entries(root, &path, index)?;
+        } else if path.extension().is_some_and(|extension| extension == "jrg") {
+            let source = fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            let document = parse_document(&source)
+                .with_context(|| format!("failed to parse {}", path.display()))?;
+            index.add(SearchEntry::from_document(
+                jrg_url_for_path(root, &path),
+                &document,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn jrg_url_for_path(root: &Path, path: &Path) -> String {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let relative = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("jrg://local/{relative}")
 }
 
 fn fetch_response_following_redirects(
@@ -965,5 +1032,32 @@ mod tests {
 
         assert_eq!(input_payload(&page), "q=nasi%20goreng");
         assert_eq!(state.status, "Updated q = nasi goreng");
+    }
+
+    #[test]
+    fn local_search_index_discovers_nested_jrg_pages() {
+        let root =
+            std::env::temp_dir().join(format!("jaringan-search-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("food")).unwrap();
+        fs::write(
+            root.join("index.jrg"),
+            "# Home\n\n=> food/laksa.jrg Laksa guide\n\n~~~~~\ntitle: Food Home\ntags: index\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("food/laksa.jrg"),
+            "# Laksa\n\n## Hawker stalls\n\n~~~~~\ntitle: Penang Laksa\ntags: laksa, hawker\n",
+        )
+        .unwrap();
+        fs::write(root.join("ignore.txt"), "laksa but not a page").unwrap();
+
+        let index = build_local_search_index(&root).unwrap();
+        let results = index.search("hawker");
+
+        assert_eq!(index.entries().len(), 2);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.url, "jrg://local/food/laksa.jrg");
+        fs::remove_dir_all(root).unwrap();
     }
 }

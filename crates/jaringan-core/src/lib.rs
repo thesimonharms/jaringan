@@ -104,6 +104,147 @@ pub struct Image {
     pub alt: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchLink {
+    pub target: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SearchEntry {
+    pub url: String,
+    pub title: String,
+    pub headings: Vec<String>,
+    pub links: Vec<SearchLink>,
+    pub metadata: Option<String>,
+}
+
+impl SearchEntry {
+    pub fn from_document(url: impl Into<String>, document: &Document) -> Self {
+        let mut headings = Vec::new();
+        let mut links = Vec::new();
+        for block in &document.blocks {
+            match block {
+                Block::Heading { text, .. } => headings.push(text.clone()),
+                Block::Link(link) => links.push(SearchLink {
+                    target: link.target.clone(),
+                    label: link.label.clone(),
+                }),
+                _ => {}
+            }
+        }
+        let title = document.title().unwrap_or("Untitled").to_owned();
+        Self {
+            url: url.into(),
+            title,
+            headings,
+            links,
+            metadata: document.metadata.clone(),
+        }
+    }
+
+    pub fn search_text(&self) -> String {
+        let link_text = self
+            .links
+            .iter()
+            .map(|link| format!("{} {}", link.label, link.target))
+            .collect::<Vec<_>>()
+            .join(" ");
+        [
+            self.title.as_str(),
+            &self.headings.join(" "),
+            &link_text,
+            self.metadata.as_deref().unwrap_or_default(),
+        ]
+        .join(" ")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchResult<'a> {
+    pub entry: &'a SearchEntry,
+    pub score: usize,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SearchIndex {
+    entries: Vec<SearchEntry>,
+}
+
+impl SearchIndex {
+    pub fn add(&mut self, entry: SearchEntry) {
+        self.entries.push(entry);
+    }
+
+    pub fn entries(&self) -> &[SearchEntry] {
+        &self.entries
+    }
+
+    pub fn search(&self, query: &str) -> Vec<SearchResult<'_>> {
+        let query = query.trim().to_ascii_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let mut results = self
+            .entries
+            .iter()
+            .filter_map(|entry| score_entry(entry, &query))
+            .collect::<Vec<_>>();
+        results.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.entry.title.cmp(&right.entry.title))
+                .then_with(|| left.entry.url.cmp(&right.entry.url))
+        });
+        results
+    }
+}
+
+fn score_entry<'a>(entry: &'a SearchEntry, query: &str) -> Option<SearchResult<'a>> {
+    let mut score = 0;
+    let mut snippet = None;
+    if entry.title.to_ascii_lowercase().contains(query) {
+        score += 10;
+        snippet = Some(entry.title.clone());
+    }
+    for heading in &entry.headings {
+        if heading.to_ascii_lowercase().contains(query) {
+            score += 5;
+            snippet.get_or_insert_with(|| heading.clone());
+        }
+    }
+    for link in &entry.links {
+        if link.label.to_ascii_lowercase().contains(query)
+            || link.target.to_ascii_lowercase().contains(query)
+        {
+            score += 3;
+            snippet.get_or_insert_with(|| link.label.clone());
+        }
+    }
+    if entry
+        .metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.to_ascii_lowercase().contains(query))
+    {
+        score += 1;
+        snippet.get_or_insert_with(|| {
+            entry
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.lines().next())
+                .unwrap_or_default()
+                .to_owned()
+        });
+    }
+    (score > 0).then(|| SearchResult {
+        entry,
+        score,
+        snippet: snippet.unwrap_or_else(|| entry.title.clone()),
+    })
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ParseError {
     #[error("unterminated preformatted block starting at line {line}")]
@@ -467,5 +608,57 @@ mod tests {
                 Block::Paragraph("This stays in the document.".into())
             ]
         );
+    }
+
+    #[test]
+    fn search_index_extracts_titles_headings_links_and_metadata() {
+        let document = parse_document(
+            "# Laksa guide\n\n## Penang stalls\n\n=> food/penang.jrg Penang food map\n\n~~~~~\ntitle: Street Food Index\ntags: laksa, hawker\n",
+        )
+        .unwrap();
+
+        let entry = SearchEntry::from_document("jrg://local/laksa.jrg", &document);
+
+        assert_eq!(entry.url, "jrg://local/laksa.jrg");
+        assert_eq!(entry.title, "Street Food Index");
+        assert_eq!(entry.headings, vec!["Laksa guide", "Penang stalls"]);
+        assert_eq!(
+            entry.links,
+            vec![SearchLink {
+                target: "food/penang.jrg".into(),
+                label: "Penang food map".into(),
+            }]
+        );
+        assert_eq!(
+            entry.metadata.as_deref(),
+            Some("title: Street Food Index\ntags: laksa, hawker")
+        );
+        assert!(entry.search_text().contains("hawker"));
+    }
+
+    #[test]
+    fn search_index_returns_ranked_case_insensitive_matches() {
+        let mut index = SearchIndex::default();
+        index.add(SearchEntry {
+            url: "jrg://local/penang.jrg".into(),
+            title: "Penang Laksa".into(),
+            headings: vec!["Hawker guide".into()],
+            links: Vec::new(),
+            metadata: None,
+        });
+        index.add(SearchEntry {
+            url: "jrg://local/coffee.jrg".into(),
+            title: "Coffee".into(),
+            headings: vec!["Laksa nearby".into()],
+            links: Vec::new(),
+            metadata: Some("tags: cafe".into()),
+        });
+
+        let results = index.search("laksa");
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].entry.url, "jrg://local/penang.jrg");
+        assert!(results[0].score > results[1].score);
+        assert_eq!(results[0].snippet, "Penang Laksa");
     }
 }
