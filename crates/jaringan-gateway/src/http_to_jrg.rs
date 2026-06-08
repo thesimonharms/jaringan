@@ -23,7 +23,8 @@
 use axum::{
     Router,
     extract::{Query, State},
-    http::{Method, StatusCode as HttpStatus},
+    http::{HeaderValue, Method, StatusCode as HttpStatus, header},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::get,
 };
@@ -85,6 +86,8 @@ impl HttpToJrgGateway {
 
         let router = Router::new()
             .route("/", get(root_handler))
+            .route("/health", get(health_handler))
+            .route_layer(middleware::from_fn(cors_middleware))
             .fallback(get(catch_all_handler).post(catch_all_handler));
 
         let listen_addr = state.config.listen_addr.clone();
@@ -161,6 +164,36 @@ async fn root_handler(State(state): State<AppState>) -> Html<String> {
     ))
 }
 
+/// CORS middleware: add permissive CORS headers for public API access.
+async fn cors_middleware(
+    request: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST, OPTIONS"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("Content-Type, Authorization"),
+    );
+    response
+}
+
+/// Health check endpoint.
+async fn health_handler() -> axum::response::Json<serde_json::Value> {
+    axum::response::Json(serde_json::json!({
+        "status": "ok",
+        "service": "jaringan-gateway",
+        "version": "0.1.0",
+    }))
+}
+
 /// Catch-all handler: routes to proxy, bridge, or implicit path proxy.
 async fn catch_all_handler(
     State(state): State<AppState>,
@@ -171,6 +204,19 @@ async fn catch_all_handler(
 ) -> Response {
     // Get the path from the URI
     let path = uri.path().trim_start_matches('/');
+
+    // Detect web URLs (http:// or https://) and auto-route through HTTP bridge
+    if path.starts_with("http://") || path.starts_with("https://") {
+        if !state.config.enable_http_bridge {
+            return (HttpStatus::BAD_REQUEST, "HTTP bridge is disabled; enable with --enable-http-bridge").into_response();
+        }
+        return http_bridge_inner(path, &state).await;
+    }
+
+    // Detect inline jrg:// URLs as implicit proxy
+    if path.starts_with("jrg://") {
+        return fetch_via_jrg_and_respond(path, &method, &query, &body, &state.config).await;
+    }
 
     // HTTP bridge: /http/*url
     if path.starts_with("http/") {

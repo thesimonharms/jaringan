@@ -1032,9 +1032,11 @@ dependencies = [
  "crossterm",
  "ed25519-dalek",
  "jaringan-core",
+ "jaringan-gateway",
  "jaringan-protocol",
  "jaringan-render",
  "ratatui",
+ "tokio",
 ]
 
 [[package]]
@@ -1056,6 +1058,7 @@ dependencies = [
  "jaringan-protocol",
  "jaringan-render",
  "reqwest",
+ "serde_json",
  "thiserror",
  "tokio",
  "url",

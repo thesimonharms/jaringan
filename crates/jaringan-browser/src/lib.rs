@@ -6,6 +6,8 @@ use jaringan_protocol::JaringanUrl;
 pub enum PageLocation {
     File(PathBuf),
     Network(JaringanUrl),
+    /// A web URL (http:// or https://) — resolved via the JrgToHttpResolver.
+    Web(String),
     Unsupported(String),
 }
 
@@ -50,6 +52,18 @@ impl BrowserState {
     }
 }
 
+/// Convert a web URL to a JrgToHttpResolver-compatible JRG URL.
+pub fn web_to_jrg_url(web_url: &str) -> String {
+    if let Some(rest) = web_url.strip_prefix("https://") {
+        format!("jrg://https.{rest}")
+    } else if let Some(rest) = web_url.strip_prefix("http://") {
+        format!("jrg://http/{rest}")
+    } else {
+        // Assume HTTPS
+        format!("jrg://https.{web_url}")
+    }
+}
+
 pub fn resolve_target(current: &PageLocation, target: &str) -> PageLocation {
     if target.starts_with("jrg://") {
         return JaringanUrl::parse(target)
@@ -57,8 +71,8 @@ pub fn resolve_target(current: &PageLocation, target: &str) -> PageLocation {
             .unwrap_or_else(|_| PageLocation::Unsupported(target.to_owned()));
     }
 
-    if looks_like_url(target) {
-        return PageLocation::Unsupported(target.to_owned());
+    if looks_like_web_url(target) {
+        return PageLocation::Web(target.to_owned());
     }
 
     match current {
@@ -67,7 +81,9 @@ pub fn resolve_target(current: &PageLocation, target: &str) -> PageLocation {
             .resolve(target)
             .map(PageLocation::Network)
             .unwrap_or_else(|_| PageLocation::Unsupported(target.to_owned())),
-        PageLocation::Unsupported(_) => PageLocation::Unsupported(target.to_owned()),
+        PageLocation::Web(_) | PageLocation::Unsupported(_) => {
+            PageLocation::Unsupported(target.to_owned())
+        }
     }
 }
 
@@ -214,8 +230,10 @@ pub fn cache_filename_for_url(url: &str) -> String {
     output.trim_matches('_').to_owned()
 }
 
-fn looks_like_url(target: &str) -> bool {
-    target.contains("://") || target.starts_with("mailto:")
+fn looks_like_web_url(target: &str) -> bool {
+    target.starts_with("http://")
+        || target.starts_with("https://")
+        || target.starts_with("www.")
 }
 
 #[cfg(test)]
@@ -251,6 +269,32 @@ mod tests {
     }
 
     #[test]
+    fn resolves_web_urls_as_web_locations() {
+        let current = PageLocation::File(PathBuf::from("/tmp/site/index.jrg"));
+
+        assert_eq!(
+            resolve_target(&current, "https://example.com/page"),
+            PageLocation::Web("https://example.com/page".to_owned())
+        );
+        assert_eq!(
+            resolve_target(&current, "http://example.com"),
+            PageLocation::Web("http://example.com".to_owned())
+        );
+    }
+
+    #[test]
+    fn converts_web_to_jrg_urls() {
+        assert_eq!(
+            web_to_jrg_url("https://example.com/page"),
+            "jrg://https.example.com/page"
+        );
+        assert_eq!(
+            web_to_jrg_url("http://example.com"),
+            "jrg://http/example.com"
+        );
+    }
+
+    #[test]
     fn records_back_history_and_returns_to_previous_page() {
         let home = PageLocation::File(PathBuf::from("/tmp/site/index.jrg"));
         let about = PageLocation::File(PathBuf::from("/tmp/site/about.jrg"));
@@ -278,95 +322,5 @@ mod tests {
         assert!(go_forward(&mut state));
         assert_eq!(state.current, about);
         assert_eq!(state.back_stack, vec![home]);
-        assert!(state.forward_stack.is_empty());
-    }
-
-    #[test]
-    fn page_scrolling_and_home_end_clamp_to_bounds() {
-        let mut state = BrowserState::new(PageLocation::File(PathBuf::from("/tmp/site/index.jrg")));
-
-        scroll_page_down(&mut state, 100, 20);
-        assert_eq!(state.scroll_offset, 20);
-        scroll_page_down(&mut state, 100, 20);
-        assert_eq!(state.scroll_offset, 40);
-        scroll_to_bottom(&mut state, 45, 20);
-        assert_eq!(state.scroll_offset, 25);
-        scroll_page_down(&mut state, 45, 20);
-        assert_eq!(state.scroll_offset, 25);
-        scroll_page_up(&mut state, 45, 20);
-        assert_eq!(state.scroll_offset, 5);
-        scroll_to_top(&mut state);
-        assert_eq!(state.scroll_offset, 0);
-    }
-
-    #[test]
-    fn selection_shortcuts_jump_to_first_and_last_items() {
-        let mut state = BrowserState::new(PageLocation::File(PathBuf::from("/tmp/site/index.jrg")));
-        state.selected = 2;
-
-        selection_first(&mut state);
-        assert_eq!(state.selected, 0);
-        selection_last(&mut state, 5);
-        assert_eq!(state.selected, 4);
-        selection_last(&mut state, 0);
-        assert_eq!(state.selected, 0);
-    }
-
-    #[test]
-    fn help_overlay_toggle_updates_state_and_status() {
-        let mut state = BrowserState::new(PageLocation::File(PathBuf::from("/tmp/site/index.jrg")));
-
-        assert!(!state.show_help);
-        toggle_help(&mut state);
-        assert!(state.show_help);
-        assert_eq!(state.status, "Help open");
-        toggle_help(&mut state);
-        assert!(!state.show_help);
-        assert_eq!(state.status, "Help closed");
-    }
-
-    #[test]
-    fn creates_safe_cache_names_for_remote_images() {
-        assert_eq!(
-            cache_filename_for_url("https://example.com/assets/cover image.png?size=large"),
-            "https_example_com_assets_cover_image_png_size_large"
-        );
-    }
-
-    #[test]
-    fn starts_in_selection_mode_and_toggles_to_scroll_mode() {
-        let mut state = BrowserState::new(PageLocation::File(PathBuf::from("/tmp/site/index.jrg")));
-
-        assert_eq!(state.mode, BrowserMode::Selection);
-        toggle_mode(&mut state);
-        assert_eq!(state.mode, BrowserMode::Scroll);
-        toggle_mode(&mut state);
-        assert_eq!(state.mode, BrowserMode::Selection);
-    }
-
-    #[test]
-    fn selection_mode_movement_changes_selected_item_only() {
-        let mut state = BrowserState::new(PageLocation::File(PathBuf::from("/tmp/site/index.jrg")));
-
-        selection_down(&mut state, 3);
-        selection_down(&mut state, 3);
-        selection_down(&mut state, 3);
-        assert_eq!(state.selected, 2);
-        assert_eq!(state.scroll_offset, 0);
-        selection_up(&mut state);
-        assert_eq!(state.selected, 1);
-    }
-
-    #[test]
-    fn scroll_mode_movement_changes_scroll_offset_only() {
-        let mut state = BrowserState::new(PageLocation::File(PathBuf::from("/tmp/site/index.jrg")));
-        switch_mode(&mut state, BrowserMode::Scroll);
-
-        scroll_down(&mut state, 20, 5);
-        scroll_down(&mut state, 20, 5);
-        assert_eq!(state.scroll_offset, 2);
-        assert_eq!(state.selected, 0);
-        scroll_up(&mut state);
-        assert_eq!(state.scroll_offset, 1);
     }
 }

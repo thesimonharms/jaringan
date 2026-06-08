@@ -13,6 +13,7 @@ jaringan-core = { path = "../jaringan-core" }
 jaringan-protocol = { path = "../jaringan-protocol" }
 jaringan-render = { path = "../jaringan-render" }
 reqwest = { workspace = true, features = ["blocking"] }
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 url.workspace = true
