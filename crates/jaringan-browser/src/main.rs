@@ -94,6 +94,14 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// View a page (jrg://, http://, or file path) and render it to stdout.
+    View {
+        /// URL or file path to view.
+        target: String,
+        /// Show the raw JRG response headers before the rendered content.
+        #[arg(long)]
+        headers: bool,
+    },
     /// Open a local path or jrg:// URL in the interactive terminal browser.
     Open {
         /// URL or file path to open (default: welcome page).
@@ -256,6 +264,28 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Command::Init { path } => init_jrg_site(&path)?,
+        Command::View { target, headers } => {
+            let loc = parse_start_location(&target)?;
+            let page = load_location(&loc)?;
+
+            if headers {
+                println!("Location: {}", loc.display_url());
+                println!("Title: {}\n", page.document.title().unwrap_or("Untitled"));
+            }
+
+            let text = jaringan_render::render_plain(&page.document);
+            print!("{text}");
+
+            // If streaming, grab the first block too
+            if let Some(ref rx) = page.stream_rx {
+                let rx = rx.lock().unwrap();
+                if let Ok(block) = rx.try_recv() {
+                    let doc = parse_document(&block)
+                        .unwrap_or_else(|_| Document::new(vec![Block::Preformatted(block)]));
+                    println!("\n{}", render_plain(&doc));
+                }
+            }
+        }
         Command::Open { target } => run_tui(target)?,
         Command::Gateway { command } => match command {
             GatewayCommand::ServeHttp {
@@ -1481,6 +1511,9 @@ fn document_from_response(response: &Response) -> anyhow::Result<Document> {
 fn parse_start_location(target: &str) -> anyhow::Result<PageLocation> {
     if target.starts_with("jrg://") {
         return Ok(PageLocation::Network(JaringanUrl::parse(target)?));
+    }
+    if target.starts_with("http://") || target.starts_with("https://") {
+        return Ok(PageLocation::Web(target.to_owned()));
     }
     Ok(PageLocation::File(canonicalish(Path::new(target))))
 }
