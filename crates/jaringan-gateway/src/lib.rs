@@ -76,7 +76,10 @@ pub fn jrg_response_to_http_response(
 /// Convert JRG response body to HTML for browser display
 pub fn jrg_to_html(response: &Response) -> String {
     let rendered = if response.content_type == ContentType::JaringanPage {
-        jaringan_render::render_plain(&jaringan_core::parse_document(&response.body).unwrap())
+        match jaringan_core::parse_document(&response.body) {
+            Ok(doc) => jaringan_render::render_plain(&doc),
+            Err(_) => format!("<pre>{}</pre>", html_escape(&response.body)),
+        }
     } else {
         response.body.clone()
     };

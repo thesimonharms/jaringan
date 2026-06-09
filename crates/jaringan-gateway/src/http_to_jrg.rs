@@ -11,7 +11,7 @@
 //!
 //! # async fn example() {
 //! let gateway = HttpToJrgGateway::new(HttpToJrgGatewayConfig {
-//!     listen_addr: "127.0.0.1:8080".parse().unwrap(),
+//!     listen_addr: "127.0.0.1:8080".to_string(),
 //!     jrg_host: "127.0.0.1:7070".to_string(),
 //!     enable_http_bridge: false,
 //!     ..Default::default()
@@ -87,8 +87,8 @@ impl HttpToJrgGateway {
         let router = Router::new()
             .route("/", get(root_handler))
             .route("/health", get(health_handler))
-            .route_layer(middleware::from_fn(cors_middleware))
-            .fallback(get(catch_all_handler).post(catch_all_handler));
+            .fallback(get(catch_all_handler).post(catch_all_handler))
+            .layer(middleware::from_fn(cors_middleware));
 
         let listen_addr = state.config.listen_addr.clone();
         let jrg_host = state.config.jrg_host.clone();
@@ -275,10 +275,15 @@ async fn http_bridge_inner(
         http_path.to_string()
     };
 
-    let client = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(state.config.timeout_secs))
         .build()
-        .unwrap();
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (HttpStatus::INTERNAL_SERVER_ERROR, format!("Failed to build HTTP client: {e}")).into_response();
+        }
+    };
 
     match client.get(&resolved).send().await {
         Ok(resp) => {

@@ -624,6 +624,21 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    /// Returns true if `trimmed` starts a block type that terminates paragraphs.
+    fn is_block_start(trimmed: &str) -> bool {
+        trimmed.starts_with("```")
+            || trimmed.starts_with('|')
+            || trimmed.starts_with('>')
+            || is_list_item(trimmed)
+            || is_rule(trimmed)
+            || parse_heading(trimmed).is_some()
+            || parse_link(trimmed).is_some()
+            || parse_input(trimmed).is_some()
+            || parse_button(trimmed).is_some()
+            || parse_image(trimmed).is_some()
+            || trimmed == "~~~~~"
+    }
+
     fn new(input: &'a str) -> Self {
         Self {
             lines: input.lines().collect(),
@@ -766,19 +781,7 @@ impl<'a> Parser<'a> {
 
         while let Some(line) = self.peek() {
             let trimmed = line.trim();
-            if trimmed.is_empty()
-                || trimmed.starts_with("```")
-                || trimmed.starts_with('|')
-                || trimmed.starts_with('>')
-                || is_list_item(trimmed)
-                || is_rule(trimmed)
-                || parse_heading(trimmed).is_some()
-                || parse_link(trimmed).is_some()
-                || parse_input(trimmed).is_some()
-                || parse_button(trimmed).is_some()
-                || parse_image(trimmed).is_some()
-                || trimmed == "~~~~~"
-            {
+            if trimmed.is_empty() || Self::is_block_start(trimmed) {
                 break;
             }
             lines.push(trimmed);

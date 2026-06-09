@@ -870,7 +870,7 @@ fn draw_frame(
     active_tab: usize,
     elapsed: Duration,
 ) {
-    use ratatui::layout::{Constraint, Direction, Layout, Rect};
+    use ratatui::layout::{Constraint, Direction, Layout};
 
     let area = frame.area();
     frame.render_widget(Clear, area);
@@ -1550,10 +1550,6 @@ fn parse_start_location(target: &str) -> anyhow::Result<PageLocation> {
     Ok(PageLocation::File(canonicalish(Path::new(target))))
 }
 
-fn location_label(location: &PageLocation) -> String {
-    location.display_url()
-}
-
 fn default_keyring() -> PublicKeyring {
     let path = default_keyring_path();
     if !path.exists() {
@@ -1633,111 +1629,6 @@ fn collect_items(document: &Document) -> Vec<InteractiveItem> {
             _ => None,
         })
         .collect()
-}
-
-fn draw(
-    frame: &mut ratatui::Frame<'_>,
-    state: &BrowserState,
-    page: &LoadedPage,
-    elapsed: Duration,
-) {
-    let area = frame.area();
-    frame.render_widget(Clear, area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(6),
-            Constraint::Length(3),
-        ])
-        .split(area);
-
-    // ── Header ──────────────────────────────────────────────────────
-    let title = page.document.title().unwrap_or("Untitled Jaringan page");
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled("✦ jaringan ", Style::default().fg(Color::Cyan).bold()),
-        Span::styled(title.to_owned(), Style::default().fg(Color::White).bold()),
-        Span::raw("  "),
-        Span::styled(
-            security_label(&page.signature_status),
-            security_style(&page.signature_status),
-        ),
-    ]))
-    .block(
-        TuiBlock::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan)),
-    );
-    frame.render_widget(header, chunks[0]);
-
-    // ── Body ─────────────────────────────────────────────────────────
-    let body = Paragraph::new(render_lines(page, state.selected))
-        .block(
-            TuiBlock::default()
-                .borders(Borders::LEFT | Borders::RIGHT)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        )
-        .scroll((state.scroll_offset, 0))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(body, chunks[1]);
-
-    // ── Footer ───────────────────────────────────────────────────────
-    let spinner = spinner(elapsed);
-    let mode_label = match state.mode {
-        BrowserMode::Selection => "SEL",
-        BrowserMode::Scroll => "SCR",
-    };
-    let mode_color = match state.mode {
-        BrowserMode::Selection => Color::Green,
-        BrowserMode::Scroll => Color::Yellow,
-    };
-
-    // Position percentage
-    let line_count = render_lines(page, state.selected).len();
-    let viewport_height = chunks[1].height.saturating_sub(2);
-    let pct = if line_count > viewport_height as usize {
-        ((state.scroll_offset as f64) / (line_count.saturating_sub(viewport_height as usize) as f64) * 100.0) as u8
-    } else {
-        100
-    };
-
-    let footer = Paragraph::new(Line::from(vec![
-        Span::styled(format!(" {spinner} "), Style::default().fg(Color::Magenta)),
-        Span::styled(
-            format!(" {mode_label} "),
-            Style::default().fg(Color::Black).bg(mode_color).bold(),
-        ),
-        Span::raw(" "),
-        Span::styled(&state.status, Style::default().fg(Color::Yellow)),
-        Span::raw(" · "),
-        Span::styled(format!("{pct}%"), Style::default().fg(Color::DarkGray)),
-        Span::raw("  "),
-        Span::styled(
-            "j/k ↓↑ • Enter ↵ • H history • B bookmarks • ? help • q quit",
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            location_label(&page.location),
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
-        ),
-    ]))
-    .block(
-        TuiBlock::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan)),
-    );
-    frame.render_widget(footer, chunks[2]);
-
-    // ── Overlays ─────────────────────────────────────────────────────
-    match state.overlay {
-        Some(jaringan_browser::Overlay::Help) => draw_help_overlay(frame, state),
-        Some(jaringan_browser::Overlay::History) => draw_history_overlay(frame, state),
-        Some(jaringan_browser::Overlay::Bookmarks) => draw_bookmarks_overlay(frame, state),
-        Some(jaringan_browser::Overlay::Find) => draw_find_overlay(frame, state),
-        None => {}
-    }
 }
 
 /// Draw the help overlay.

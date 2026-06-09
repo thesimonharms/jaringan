@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use reqwest::blocking::Client;
 use reqwest::header::CONTENT_TYPE;
+use reqwest::redirect::Policy;
 
 use crate::GatewayError;
 use jaringan_protocol::{
@@ -69,6 +70,11 @@ impl JrgToHttpResolver {
             .timeout(Duration::from_secs(config.timeout_secs))
             .user_agent(&config.user_agent)
             .danger_accept_invalid_certs(false)
+            .redirect(if config.follow_redirects {
+                Policy::default()
+            } else {
+                Policy::none()
+            })
             .build()
             .expect("reqwest blocking client build");
 
@@ -95,50 +101,70 @@ impl JrgToHttpResolver {
     }
 
     /// Simple HTML tag stripping for display in JRG.
+    /// Uses a character-by-character state machine (O(n), no extra allocations).
     fn strip_html_tags(html: &str) -> String {
-        let mut result = String::new();
+        let mut result = String::with_capacity(html.len());
+        let bytes = html.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
         let mut in_tag = false;
         let mut in_script = false;
         let mut in_style = false;
-        let lower = html.to_lowercase();
-        let mut iter = html.chars().enumerate().peekable();
 
-        while let Some((i, ch)) = iter.next() {
+        while i < len {
+            let ch = bytes[i] as char;
+
             if ch == '<' {
-                if lower[i..].starts_with("<script") {
+                // Check for script/style tags without lowercasing the whole string
+                let remaining = &bytes[i..];
+                let tag3 = |s: &[u8]| s.len() >= 8
+                    && s[1..8].eq_ignore_ascii_case(b"script>");
+                let tag6 = |s: &[u8]| s.len() >= 7
+                    && s[1..7].eq_ignore_ascii_case(b"style>");
+                let close_script = remaining.len() >= 9
+                    && remaining[..9].eq_ignore_ascii_case(b"</script>");
+                let close_style = remaining.len() >= 8
+                    && remaining[..8].eq_ignore_ascii_case(b"</style>");
+
+                if close_script {
+                    in_script = false;
+                    in_tag = true;
+                } else if close_style {
+                    in_style = false;
+                    in_tag = true;
+                } else if !in_script && !in_style && tag3(remaining) {
                     in_script = true;
                     in_tag = true;
-                } else if lower[i..].starts_with("<style") {
+                } else if !in_script && !in_style && tag6(remaining) {
                     in_style = true;
                     in_tag = true;
                 } else {
                     in_tag = true;
                 }
+
                 // Add a space when closing a tag to prevent words running together
                 if !result.is_empty() && !result.ends_with(' ') {
                     result.push(' ');
                 }
+                i += 1;
                 continue;
             }
 
             if in_tag {
                 if ch == '>' {
-                    if in_script && lower[i.saturating_sub(8)..].starts_with("</script") {
-                        in_script = false;
-                    }
-                    if in_style && lower[i.saturating_sub(6)..].starts_with("</style") {
-                        in_style = false;
-                    }
                     in_tag = false;
                 }
+                i += 1;
                 continue;
             }
 
             if in_script || in_style {
+                i += 1;
                 continue;
             }
 
             result.push(ch);
+            i += 1;
         }
 
         // Collapse whitespace

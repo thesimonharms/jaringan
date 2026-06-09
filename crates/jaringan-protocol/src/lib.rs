@@ -685,11 +685,11 @@ pub fn serve_stream_encrypted(
 }
 
 pub fn fetch_tcp(url: &JaringanUrl) -> Result<Response, WireError> {
-    fetch_tcp_with_timeout(url, Duration::from_secs(5))
+    fetch_tcp_with_timeout(url, Duration::from_secs(30))
 }
 
 pub fn post_tcp(url: &JaringanUrl, body: String) -> Result<Response, WireError> {
-    send_tcp_with_timeout(Request::post(url.clone(), body), Duration::from_secs(5))
+    send_tcp_with_timeout(Request::post(url.clone(), body), Duration::from_secs(30))
 }
 
 pub fn post_tcp_with_action_token(
@@ -699,7 +699,7 @@ pub fn post_tcp_with_action_token(
 ) -> Result<Response, WireError> {
     send_tcp_with_timeout(
         Request::post(url.clone(), body).with_action_token(token),
-        Duration::from_secs(5),
+        Duration::from_secs(30),
     )
 }
 
@@ -722,7 +722,7 @@ pub fn fetch_tcp_encrypted(
     url: &JaringanUrl,
     config: &EncryptedTcpConfig,
 ) -> Result<Response, WireError> {
-    fetch_tcp_encrypted_with_timeout(url, config, Duration::from_secs(5))
+    fetch_tcp_encrypted_with_timeout(url, config, Duration::from_secs(30))
 }
 
 pub fn fetch_tcp_encrypted_with_timeout(
@@ -741,7 +741,7 @@ pub fn post_tcp_encrypted(
     send_tcp_encrypted_with_timeout(
         Request::post(url.clone(), body),
         config,
-        Duration::from_secs(5),
+        Duration::from_secs(30),
     )
 }
 
@@ -849,7 +849,7 @@ impl StreamConnection {
 /// text/jrg-stream`).  Returns the header-only response and a
 /// `StreamConnection` for reading incremental blocks.
 pub fn fetch_tcp_stream(url: &JaringanUrl) -> Result<StreamConnection, WireError> {
-    fetch_tcp_stream_with_timeout(url, Duration::from_secs(5))
+    fetch_tcp_stream_with_timeout(url, Duration::from_secs(30))
 }
 
 /// Like `fetch_tcp_stream` but with a configurable timeout.

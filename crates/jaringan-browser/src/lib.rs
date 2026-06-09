@@ -23,7 +23,9 @@ pub fn data_dir() -> PathBuf {
 /// Ensure the data directory exists and return its path.
 pub fn ensure_data_dir() -> PathBuf {
     let dir = data_dir();
-    fs::create_dir_all(&dir).ok();
+    if let Err(e) = fs::create_dir_all(&dir) {
+        eprintln!("[jaringan] warning: failed to create data directory {}: {e}", dir.display());
+    }
     dir
 }
 
@@ -42,7 +44,9 @@ pub fn history_path() -> PathBuf {
 
 pub fn save_history(entries: &[HistoryEntry]) {
     if let Ok(json) = serde_json::to_string(entries) {
-        let _ = fs::write(history_path(), json);
+        if let Err(e) = fs::write(history_path(), json) {
+            eprintln!("[jaringan] warning: failed to save history: {e}");
+        }
     }
 }
 
@@ -92,7 +96,9 @@ pub fn bookmarks_path() -> PathBuf {
 
 pub fn save_bookmarks(entries: &[Bookmark]) {
     if let Ok(json) = serde_json::to_string(entries) {
-        let _ = fs::write(bookmarks_path(), json);
+        if let Err(e) = fs::write(bookmarks_path(), json) {
+            eprintln!("[jaringan] warning: failed to save bookmarks: {e}");
+        }
     }
 }
 
@@ -499,6 +505,7 @@ mod tests {
     fn history_and_bookmarks_persistence() {
         let dir = std::env::temp_dir().join(format!("jrg-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
+        // SAFETY: single-threaded test, no other code reads JARINGAN_DATA
         unsafe { std::env::set_var("JARINGAN_DATA", &dir); }
 
         let mut entries = Vec::new();
@@ -521,6 +528,7 @@ mod tests {
         assert_eq!(loaded_bm[0].name, "My Page");
 
         let _ = fs::remove_dir_all(&dir);
+        // SAFETY: single-threaded test cleanup
         unsafe { std::env::remove_var("JARINGAN_DATA"); }
     }
 }
