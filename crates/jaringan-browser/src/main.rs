@@ -19,7 +19,7 @@ use jaringan_browser::{
     cache_filename_for_url, go_back, go_forward, navigate_to, resolve_target, scroll_down,
     scroll_page_down, scroll_page_up, scroll_to_bottom, scroll_to_top, scroll_up,
     selection_down, selection_first, selection_last, selection_up, switch_mode,
-    toggle_mode, toggle_overlay,
+    toggle_mode, toggle_overlay, web_to_jrg_url,
 };
 use jaringan_core::{
     ActionMethod, Block, Document, Image, Input, PublicKeyring, SearchEntry, SearchIndex,
@@ -101,6 +101,11 @@ enum Command {
         /// Show the raw JRG response headers before the rendered content.
         #[arg(long)]
         headers: bool,
+    },
+    /// Show the raw content/response for a URL (no rendering).
+    Raw {
+        /// URL or file path to dump raw.
+        target: String,
     },
     /// Open a local path or jrg:// URL in the interactive terminal browser.
     Open {
@@ -284,6 +289,33 @@ fn main() -> anyhow::Result<()> {
                         .unwrap_or_else(|_| Document::new(vec![Block::Preformatted(block)]));
                     println!("\n{}", render_plain(&doc));
                 }
+            }
+        }
+        Command::Raw { target } => {
+            let loc = parse_start_location(&target)?;
+            match loc {
+                PageLocation::File(path) => {
+                    let content = fs::read_to_string(&path)
+                        .with_context(|| format!("failed to read {}", path.display()))?;
+                    print!("{content}");
+                }
+                PageLocation::Network(ref url) => {
+                    let response = fetch_tcp(url)?;
+                    print_response(response);
+                }
+                PageLocation::Web(ref url) => {
+                    let resolver = jaringan_gateway::JrgToHttpResolver::new(
+                        jaringan_gateway::JrgToHttpResolverConfig::default(),
+                    );
+                    let jrg_url = web_to_jrg_url(url);
+                    let parsed = JaringanUrl::parse(&jrg_url)?;
+                    let request = Request::new(parsed);
+                    let response = resolver.fetch(&request).map_err(|e| {
+                        anyhow::anyhow!("failed to fetch web page {url}: {e}")
+                    })?;
+                    print_response(response);
+                }
+                PageLocation::Unsupported(target) => bail!("unsupported target: {target}"),
             }
         }
         Command::Open { target } => run_tui(target)?,
