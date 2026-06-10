@@ -56,7 +56,13 @@ pub enum Block {
     List(Vec<String>),
     Rule,
     Table(Table),
-    Preformatted(String),
+    /// Preformatted code block with optional language hint (e.g. "rust", "python").
+    Preformatted {
+        /// The raw content of the preformatted block.
+        code: String,
+        /// Optional language tag from the opening ``` fence (e.g. "rust", "python").
+        language: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,7 +295,7 @@ impl SearchEntry {
                     target: link.target.clone(),
                     label: link.label.clone(),
                 }),
-                Block::Paragraph(text) | Block::Preformatted(text) | Block::Quote(text) => {
+                Block::Paragraph(text) | Block::Preformatted { code: text, .. } | Block::Quote(text) => {
                     body_parts.push(text.clone())
                 }
                 Block::List(items) => body_parts.push(items.join("\n")),
@@ -705,13 +711,24 @@ impl<'a> Parser<'a> {
 
     fn parse_preformatted(&mut self) -> Result<(), ParseError> {
         let start_line = self.cursor + 1;
+        let open_line = self.peek().unwrap_or("");
+        let language = open_line
+            .trim()
+            .strip_prefix("```")
+            .and_then(|rest| {
+                let lang = rest.trim();
+                if lang.is_empty() { None } else { Some(lang.to_owned()) }
+            });
         self.cursor += 1;
         let mut body = Vec::new();
 
         while let Some(line) = self.peek() {
             if line.trim().starts_with("```") {
                 self.cursor += 1;
-                self.blocks.push(Block::Preformatted(body.join("\n")));
+                self.blocks.push(Block::Preformatted {
+                    code: body.join("\n"),
+                    language,
+                });
                 return Ok(());
             }
             body.push(line);
@@ -971,7 +988,10 @@ mod tests {
                     level: 1,
                     text: "Code".into()
                 },
-                Block::Preformatted("  keep spacing".into())
+                Block::Preformatted {
+                    code: "  keep spacing".into(),
+                    language: Some("plain".into()),
+                }
             ]
         );
     }

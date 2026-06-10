@@ -9,3 +9,4 @@ repository.workspace = true
 [dependencies]
 jaringan-core.workspace = true
 ratatui.workspace = true
+syntect = "5"

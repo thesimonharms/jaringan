@@ -286,7 +286,7 @@ fn main() -> anyhow::Result<()> {
                 let rx = rx.lock().unwrap();
                 if let Ok(block) = rx.try_recv() {
                     let doc = parse_document(&block)
-                        .unwrap_or_else(|_| Document::new(vec![Block::Preformatted(block)]));
+                        .unwrap_or_else(|_| Document::new(vec![Block::Preformatted { code: block, language: None }]));
                     println!("\n{}", render_plain(&doc));
                 }
             }
@@ -1382,7 +1382,7 @@ fn load_file_page_with_keyring(path: &Path, keyring: &PublicKeyring) -> anyhow::
         // Non-.jrg files: load as plain text
         let source = fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let document = Document::new(vec![Block::Preformatted(source)]);
+        let document = Document::new(vec![Block::Preformatted { code: source, language: None }]);
         let items = collect_items(&document);
         return Ok(LoadedPage {
             location: PageLocation::File(path),
@@ -1508,7 +1508,7 @@ fn network_error_page(location: JaringanUrl, message: String) -> LoadedPage {
             level: 1,
             text: "Network error".to_owned(),
         },
-        Block::Preformatted(message),
+        Block::Preformatted { code: message, language: None },
     ]);
 
     LoadedPage {
@@ -1537,7 +1537,7 @@ fn document_from_response(response: &Response) -> anyhow::Result<Document> {
         )
     };
 
-    Ok(Document::new(vec![Block::Preformatted(text)]))
+    Ok(Document::new(vec![Block::Preformatted { code: text, language: None }]))
 }
 
 fn parse_start_location(target: &str) -> anyhow::Result<PageLocation> {
@@ -1862,12 +1862,12 @@ fn render_lines(page: &LoadedPage, selected: usize) -> Vec<Line<'static>> {
                 }
                 lines.push(Line::raw(""));
             }
-            Block::Preformatted(text) => {
+            Block::Preformatted { code, .. } => {
                 lines.push(Line::from(Span::styled(
                     "╭─",
                     Style::default().fg(Color::DarkGray),
                 )));
-                for line in text.lines() {
+                for line in code.lines() {
                     lines.push(Line::from(vec![
                         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
                         Span::styled(line.to_owned(), Style::default().fg(Color::White)),
@@ -2162,7 +2162,7 @@ fn welcome_document() -> Document {
             label: "Browse .jrg files in current directory".to_owned(),
         }),
         Block::Paragraph("Press Enter on the link above, or run:".to_owned()),
-        Block::Preformatted("  jaringan-browser open <path-or-jrg-url>".to_owned()),
+        Block::Preformatted { code: "  jaringan-browser open <path-or-jrg-url>".to_owned(), language: None },
         Block::Heading {
             level: 2,
             text: "Quick Commands".to_owned(),
@@ -2181,7 +2181,7 @@ fn welcome_document() -> Document {
             text: "Scaffold a New Site".to_owned(),
         },
         Block::Paragraph("Create a new Jaringan site with:".to_owned()),
-        Block::Preformatted("  jaringan-browser init ./my-site".to_owned()),
+        Block::Preformatted { code: "  jaringan-browser init ./my-site".to_owned(), language: None },
         Block::Rule,
         Block::Paragraph("Press ? for full help, or q to quit.".to_owned()),
     ])
@@ -2514,7 +2514,7 @@ mod tests {
         );
         assert!(matches!(
             page.document.blocks.first(),
-            Some(Block::Preformatted(body))
+            Some(Block::Preformatted { code: body, .. })
                 if body.contains("JRG/0.1 403 Forbidden")
                     && body.contains("missing or invalid action capability token")
         ));
@@ -2705,7 +2705,7 @@ mod tests {
         );
         assert!(result_txt.is_ok(), ".txt files should load as plain text: {:?}", result_txt);
         let page = result_txt.unwrap();
-        assert!(matches!(page.document.blocks.first(), Some(Block::Preformatted(_))));
+        assert!(matches!(page.document.blocks.first(), Some(Block::Preformatted { .. })));
         assert_eq!(page.signature_status, SignatureStatus::Unsigned);
 
         // No extension — loads as plain text too
@@ -2716,7 +2716,7 @@ mod tests {
         );
         assert!(result_noext.is_ok(), "files without extension should load as plain text: {:?}", result_noext);
         let page = result_noext.unwrap();
-        assert!(matches!(page.document.blocks.first(), Some(Block::Preformatted(_))));
+        assert!(matches!(page.document.blocks.first(), Some(Block::Preformatted { .. })));
 
         // .jrg still parses as JRG
         fs::write(root.join("readme.jrg"), "# Hello").unwrap();

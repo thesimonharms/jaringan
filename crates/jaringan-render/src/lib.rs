@@ -1,5 +1,18 @@
 use jaringan_core::{Block, Document, Table};
 use ratatui::text::{Line, Span, Text};
+use ratatui::style::{Style, Color, Modifier};
+use syntect::parsing::SyntaxSet;
+use syntect::highlighting::{ThemeSet, FontStyle};
+use syntect::easy::HighlightLines;
+use syntect::util::LinesWithEndings;
+
+use std::sync::LazyLock;
+
+static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(|| {
+    SyntaxSet::load_defaults_newlines()
+});
+
+static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(|| ThemeSet::load_defaults());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderOptions {
@@ -86,9 +99,10 @@ pub fn render_plain_with_options(document: &Document, options: RenderOptions) ->
                 output.push_str(&render_table_plain(table));
                 output.push_str("\n\n");
             }
-            Block::Preformatted(text) => {
-                output.push_str("```\n");
-                output.push_str(text);
+            Block::Preformatted { code, language } => {
+                let lang = language.as_deref().unwrap_or("");
+                output.push_str(&format!("```{lang}\n"));
+                output.push_str(&highlight_ansi(code, language.as_deref()));
                 output.push_str("\n```\n\n");
             }
         }
@@ -171,16 +185,88 @@ pub fn render_ratatui_text(document: &Document) -> Text<'static> {
                 );
                 lines.push(Line::raw(""));
             }
-            Block::Preformatted(text) => {
-                lines.push(Line::raw("```"));
-                lines.extend(text.lines().map(|line| Line::raw(line.to_owned())));
-                lines.push(Line::raw("```"));
+            Block::Preformatted { code, language } => {
+                let highlighted = highlight_ratatui(code, language.as_deref());
+                if highlighted.len() > 1 || code.contains('\n') {
+                    lines.push(Line::raw("```"));
+                    lines.extend(highlighted);
+                    lines.push(Line::raw("```"));
+                } else {
+                    lines.extend(highlighted);
+                }
                 lines.push(Line::raw(""));
             }
         }
     }
 
     Text::from(lines)
+}
+
+/// Highlight code using syntect and return ANSI 24-bit color escape sequences.
+fn highlight_ansi(code: &str, language: Option<&str>) -> String {
+    let Some(lang) = language else {
+        return code.to_owned();
+    };
+    let syntax = SYNTAX_SET
+        .find_syntax_by_token(lang)
+        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+    let mut highlighter =
+        HighlightLines::new(syntax, &THEME_SET.themes["base16-ocean.dark"]);
+    let mut output = String::new();
+    for line in LinesWithEndings::from(code) {
+        if let Ok(ranges) = highlighter.highlight_line(line, &SYNTAX_SET) {
+            output.push_str(&syntect::util::as_24_bit_terminal_escaped(&ranges, false));
+        }
+    }
+    output
+}
+
+/// Highlight code using syntect and return ratatui Lines with colored spans.
+fn highlight_ratatui(code: &str, language: Option<&str>) -> Vec<Line<'static>> {
+    let Some(lang) = language else {
+        return vec![Line::from(Span::raw(code.to_owned()))];
+    };
+    let syntax = SYNTAX_SET
+        .find_syntax_by_token(lang)
+        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+    let mut highlighter =
+        HighlightLines::new(syntax, &THEME_SET.themes["base16-ocean.dark"]);
+    let mut lines = Vec::new();
+    for line in LinesWithEndings::from(code) {
+        if let Ok(ranges) = highlighter.highlight_line(line, &SYNTAX_SET) {
+            let spans: Vec<Span<'static>> = ranges
+                .into_iter()
+                .map(|(style, text)| {
+                    Span::styled(text.to_string(), syntect_style_to_ratatui(style))
+                })
+                .collect();
+            lines.push(Line::from(spans));
+        }
+    }
+    lines
+}
+
+/// Convert a syntect Style to a ratatui Style.
+fn syntect_style_to_ratatui(style: syntect::highlighting::Style) -> Style {
+    let mut s = Style::default();
+    if style.foreground.a > 0 {
+        let c = style.foreground;
+        s = s.fg(Color::Rgb(c.r, c.g, c.b));
+    }
+    if style.background.a > 0 {
+        let c = style.background;
+        s = s.bg(Color::Rgb(c.r, c.g, c.b));
+    }
+    if style.font_style.contains(FontStyle::BOLD) {
+        s = s.add_modifier(Modifier::BOLD);
+    }
+    if style.font_style.contains(FontStyle::ITALIC) {
+        s = s.add_modifier(Modifier::ITALIC);
+    }
+    if style.font_style.contains(FontStyle::UNDERLINE) {
+        s = s.add_modifier(Modifier::UNDERLINED);
+    }
+    s
 }
 
 fn render_table_plain(table: &Table) -> String {
