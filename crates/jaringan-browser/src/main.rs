@@ -124,6 +124,12 @@ enum Command {
         #[command(subcommand)]
         command: GatewayCommand,
     },
+    /// List installed WASM plugins
+    Plugins {
+        /// Path to plugins directory (default: ~/.config/jaringan/plugins/)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -339,6 +345,35 @@ fn main() -> anyhow::Result<()> {
                     .and_then(|c| c.default_target)
             });
             run_tui(target)?
+        }
+        Command::Plugins { dir } => {
+            let dir = dir.unwrap_or_else(|| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".config/jaringan/plugins")
+            });
+            let mut registry = PluginRegistry::new(&dir)
+                .map_err(|e| anyhow::anyhow!("failed to create plugin registry: {e}"))?;
+            registry.load_all()
+                .map_err(|e| anyhow::anyhow!("failed to load plugins: {e}"))?;
+            let plugins = registry.plugins();
+            if plugins.is_empty() {
+                println!("No WASM plugins found in {}", dir.display());
+            } else {
+                for plugin in plugins {
+                    println!("{} v{}", plugin.registration.name, plugin.registration.version);
+                    if let Some(ref desc) = plugin.registration.description {
+                        println!("  {desc}");
+                    }
+                    println!(
+                        "  Hooks: {}",
+                        plugin.registration.hooks.iter().map(|h| format!("{h:?}")).collect::<Vec<_>>().join(", ")
+                    );
+                    println!("  Path: {}", plugin.path.display());
+                    println!();
+                }
+            }
         }
         Command::Gateway { command } => match command {
             GatewayCommand::ServeHttp {

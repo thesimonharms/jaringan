@@ -155,15 +155,23 @@ mod tests {
         std::env::temp_dir().join(format!("jrg-test-{ts}"))
     }
 
-    /// A minimal WAT plugin that registers with name "test" and OnPageLoad hook.
+    /// A minimal WAT plugin that registers with name "test" and OnPageLoad hook,
+    /// and implements process() returning an empty ScriptOutput.
     const PLUGIN_WAT: &str = r#"
 (module
   (memory (export "memory") 1)
   (func (export "register") (result i32)
     i32.const 0
   )
+  (func (export "process") (param i32 i32) (result i32)
+    i32.const 200
+  )
+  ;; Register output at offset 0: len(80) + JSON
   (data (i32.const 0) "\50\00\00\00")
   (data (i32.const 4) "{\"name\":\"test\",\"version\":\"1.0\",\"hooks\":[{\"hook\":\"OnPageLoad\"}],\"keybindings\":[]}")
+  ;; Process output at offset 200: len(13) + {"blocks":[]}
+  (data (i32.const 200) "\0d\00\00\00")
+  (data (i32.const 204) "{\"blocks\":[]}")
 )
 "#;
 
