@@ -107,7 +107,7 @@ pub fn render_plain_with_options(document: &Document, options: RenderOptions) ->
             }
             Block::Script { label, .. } => {
                 if let Some(label) = label {
-                    output.push_str(&format!("[script] {label}\n\n"));
+                    output.push_str(&format!("⚡ [{label}]\n\n"));
                 }
             }
         }
@@ -203,7 +203,7 @@ pub fn render_ratatui_text(document: &Document) -> Text<'static> {
             }
             Block::Script { label, .. } => {
                 if let Some(label) = label {
-                    lines.push(Line::raw(format!("[script] {label}")));
+                    lines.push(Line::raw(format!("⚡ [{label}]")));
                     lines.push(Line::raw(""));
                 }
             }

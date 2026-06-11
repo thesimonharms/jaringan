@@ -1,0 +1,100 @@
+# WASM Plugin ABI Reference
+
+## Overview
+
+Jaringan supports WebAssembly (WASM) plugins at two levels:
+- **Page scripts**: embedded in `.jrg` files via `~>...~<` syntax, run on every page load
+- **TUI plugins**: stored in `~/.config/jaringan/plugins/*.wasm`, extend the browser itself
+
+## ABI
+
+Every WASM module must export:
+
+### `memory`
+A WASM linear memory (at least 2 pages = 128KB).
+
+### `process(input_ptr: i32, input_len: i32) -> i32` (page scripts)
+Receives a JSON-encoded `ScriptInput` in WASM memory at `input_ptr`.
+Returns a pointer to the output buffer:
+- Bytes 0-3: little-endian u32 length of the JSON body
+- Bytes 4+: JSON-encoded `ScriptOutput`
+
+### `register() -> i32` (TUI plugins only)
+Returns a pointer to a buffer containing:
+- Bytes 0-3: little-endian u32 length of the JSON body
+- Bytes 4+: JSON-encoded `PluginRegistration`
+
+## PluginRegistration Format
+
+```json
+{
+  "name": "my-plugin",
+  "version": "1.0.0",
+  "description": "Optional description",
+  "hooks": [{"hook": "OnPageLoad"}],
+  "keybindings": []
+}
+```
+
+Supported hooks: `OnPageLoad`, `OnKey`, `OnRender`
+
+## ScriptInput Format
+
+```json
+{
+  "title": "Page Title",
+  "inputs": [{"name": "q", "label": "Query", "value": "laksa", "placeholder": "Search"}],
+  "metadata": null,
+  "blocks": [{"type": "heading", "level": 1, "text": "Hello"}],
+  "tui": null
+}
+```
+
+When `tui` is set (for `OnKey` hook), it contains:
+```json
+{
+  "current_url": "jrg://example/page.jrg",
+  "current_title": "Page Title",
+  "scroll_offset": 42,
+  "selected_index": 0,
+  "mode": "Selection"
+}
+```
+
+## Writing Plugins
+
+Compile any language that targets WASM:
+
+```bash
+# Rust
+cargo build --target wasm32-unknown-unknown --release
+
+# Zig
+zig build-exe plugin.zig -target wasm32-freestanding
+
+# TinyGo
+tinygo build -o plugin.wasm -target wasm plugin.go
+```
+
+Place the `.wasm` file in `~/.config/jaringan/plugins/` and restart the browser
+(or press Ctrl+Shift+R to hot-reload).
+
+## Example WAT
+
+```wat
+(module
+  (memory (export "memory") 2)
+  (func (export "register") (result i32)
+    ;; JSON at offset 0: registration info
+    (i32.store (i32.const 4096) (i32.const 95))
+    (memory.copy (i32.const 4100) (i32.const 0) (i32.const 95))
+    (i32.const 4096)
+  )
+  (func (export "process") (param i32 i32) (result i32)
+    (i32.store (i32.const 65536) (local.get 1))
+    (memory.copy (i32.const 65540) (i32.const 0) (local.get 1))
+    (i32.const 65536)
+  )
+  (data (i32.const 0) "{\"name\":\"example\",\"version\":\"1.0\",\"hooks\":[{\"hook\":\"OnPageLoad\"}],\"keybindings\":[]}")
+)
+```

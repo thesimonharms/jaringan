@@ -746,7 +746,7 @@ fn run_app(
 
         match event::read()? {
             Event::Key(key) => {
-                handle_key_event(&mut tabs, &mut active_tab, terminal, key, &script_runtime, &plugin_registry)?;
+                handle_key_event(&mut tabs, &mut active_tab, terminal, key, &script_runtime, &mut plugin_registry)?;
             }
             Event::Resize(_, _) => {}
             _ => {}
@@ -761,7 +761,7 @@ fn handle_key_event(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     key: crossterm::event::KeyEvent,
     script_runtime: &Option<WasmRuntime>,
-    plugin_registry: &PluginRegistry,
+    plugin_registry: &mut PluginRegistry,
 ) -> anyhow::Result<()> {
     let ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
@@ -1058,6 +1058,18 @@ fn handle_key_event(
                     state.find_state.match_idx + 1,
                     state.find_state.matches.len()
                 );
+            }
+        }
+        // Plugin reload: Ctrl+Shift+R — hot-reload all WASM plugins
+        KeyCode::Char('R')
+            if ctrl
+                && key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) =>
+        {
+            if let Err(e) = plugin_registry.load_all() {
+                state.status = format!("Plugin reload failed: {e}");
+            } else {
+                let count = plugin_registry.plugins().len();
+                state.status = format!("Reloaded {count} plugin(s)");
             }
         }
         _ => {}
