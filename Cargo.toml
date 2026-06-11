@@ -6,6 +6,7 @@ members = [
     "crates/jaringan-gateway",
     "crates/jaringan-protocol",
     "crates/jaringan-render",
+    "crates/jaringan-script",
 ]
 resolver = "3"
 
@@ -36,3 +37,4 @@ jaringan-core = { path = "crates/jaringan-core" }
 jaringan-gateway = { path = "crates/jaringan-gateway" }
 jaringan-protocol = { path = "crates/jaringan-protocol" }
 jaringan-render = { path = "crates/jaringan-render" }
+jaringan-script = { path = "crates/jaringan-script" }

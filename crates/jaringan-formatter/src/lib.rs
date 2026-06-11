@@ -127,6 +127,13 @@ impl JrgFormatter {
                     }
                     let _ = writeln!(out, "```");
                 }
+                Block::Script { label, .. } => {
+                    if let Some(label) = label {
+                        let _ = writeln!(out, "~> {}", label);
+                    } else {
+                        let _ = writeln!(out, "~>");
+                    }
+                }
             }
 
             // Blank line separator between blocks
@@ -174,6 +181,7 @@ impl JrgFormatter {
                     Block::Rule => "rule",
                     Block::Table(_) => "table",
                     Block::Preformatted { .. } => "preformatted",
+                    Block::Script { .. } => "script",
                 });
             }
         }
@@ -386,6 +394,7 @@ impl JrgFormatter {
             Block::Rule => 1,
             Block::Table(table) => 2 + table.rows.len(), // header + sep + data rows
             Block::Preformatted { code, .. } => 2 + code.lines().count(), // ```open + body lines + ```
+            Block::Script { .. } => 1, // ~> header only in formatted output
         }
     }
 }

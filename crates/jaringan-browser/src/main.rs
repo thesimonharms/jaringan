@@ -2210,6 +2210,7 @@ fn render_lines(page: &LoadedPage, selected: usize, find_state: &FindState, find
                 )));
                 lines.push(Line::raw(""));
             }
+            Block::Script { .. } => {} // Script blocks are not rendered visually
         }
     }
 

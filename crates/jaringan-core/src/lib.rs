@@ -63,6 +63,13 @@ pub enum Block {
         /// Optional language tag from the opening ``` fence (e.g. "rust", "python").
         language: Option<String>,
     },
+    /// An embedded WASM module that runs when the page is loaded.
+    Script {
+        /// Compiled WASM binary.
+        wasm: Vec<u8>,
+        /// Optional label for display/debugging.
+        label: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -304,6 +311,11 @@ impl SearchEntry {
                 Block::Input(input) => body_parts.push(format!("{} {}", input.label, input.value)),
                 Block::Button(button) => body_parts.push(button.label.clone()),
                 Block::Image(image) => body_parts.push(image.alt.clone()),
+                Block::Script { label, .. } => {
+                    if let Some(label) = label {
+                        body_parts.push(label.clone());
+                    }
+                }
             }
         }
         let title = document.title().unwrap_or("Untitled").to_owned();
@@ -643,6 +655,7 @@ impl<'a> Parser<'a> {
             || parse_button(trimmed).is_some()
             || parse_image(trimmed).is_some()
             || trimmed == "~~~~~"
+            || trimmed.starts_with("~>")
     }
 
     fn new(input: &'a str) -> Self {
@@ -694,6 +707,8 @@ impl<'a> Parser<'a> {
             } else if let Some(image) = parse_image(trimmed) {
                 self.blocks.push(Block::Image(image));
                 self.cursor += 1;
+            } else if trimmed.starts_with("~>") {
+                self.parse_script();
             } else {
                 self.parse_paragraph();
             }
@@ -806,6 +821,34 @@ impl<'a> Parser<'a> {
         }
 
         self.blocks.push(Block::Paragraph(lines.join(" ")));
+    }
+
+    fn parse_script(&mut self) {
+        let line = self.peek().unwrap_or("");
+        let remainder = line.trim().strip_prefix("~>").unwrap_or("").trim();
+        let label = if remainder.is_empty() { None } else { Some(remainder.to_owned()) };
+        self.cursor += 1;
+
+        let mut body = Vec::new();
+        while let Some(line) = self.peek() {
+            if line.trim() == "~<" {
+                self.cursor += 1;
+                break;
+            }
+            body.push(line);
+            self.cursor += 1;
+        }
+
+        let joined = body.join("\n");
+        let wasm = if joined.trim().starts_with('(') {
+            wat::parse_str(joined).unwrap_or_default()
+        } else {
+            base64::engine::general_purpose::STANDARD
+                .decode(joined.trim())
+                .unwrap_or_default()
+        };
+
+        self.blocks.push(Block::Script { wasm, label });
     }
 }
 
@@ -1291,5 +1334,12 @@ mod tests {
 
         assert!(error.contains("line 2"));
         assert!(error.contains("expected `<signer> ed25519:<base64-public-key>`"));
+    }
+
+    #[test]
+    fn parses_wasm_script_block() {
+        let source = "# With Script\n\n~> My Transform\n(module\n  (memory (export \"memory\") 2)\n  (func (export \"process\") (param i32 i32) (result i32)\n    local.get 0\n  )\n)\n~<\n";
+        let doc = parse_document(source).unwrap();
+        assert!(doc.blocks.iter().any(|b| matches!(b, Block::Script { .. })));
     }
 }

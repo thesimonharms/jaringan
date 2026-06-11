@@ -105,6 +105,11 @@ pub fn render_plain_with_options(document: &Document, options: RenderOptions) ->
                 output.push_str(&highlight_ansi(code, language.as_deref()));
                 output.push_str("\n```\n\n");
             }
+            Block::Script { label, .. } => {
+                if let Some(label) = label {
+                    output.push_str(&format!("[script] {label}\n\n"));
+                }
+            }
         }
     }
 
@@ -195,6 +200,12 @@ pub fn render_ratatui_text(document: &Document) -> Text<'static> {
                     lines.extend(highlighted);
                 }
                 lines.push(Line::raw(""));
+            }
+            Block::Script { label, .. } => {
+                if let Some(label) = label {
+                    lines.push(Line::raw(format!("[script] {label}")));
+                    lines.push(Line::raw(""));
+                }
             }
         }
     }
