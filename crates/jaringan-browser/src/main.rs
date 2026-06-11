@@ -16,7 +16,7 @@ use crossterm::{
 };
 use jaringan_browser::{
     ActionConfirmation, BrowserMode, BrowserState, PageLocation,
-    cache_filename_for_url, go_back, go_forward, navigate_to, resolve_target, scroll_down,
+    cache_filename_for_url, config::parse_color, go_back, go_forward, navigate_to, resolve_target, scroll_down,
     scroll_page_down, scroll_page_up, scroll_to_bottom, scroll_to_top, scroll_up,
     selection_down, selection_first, selection_last, selection_up, switch_mode,
     toggle_mode, toggle_overlay, web_to_jrg_url,
@@ -318,7 +318,15 @@ fn main() -> anyhow::Result<()> {
                 PageLocation::Unsupported(target) => bail!("unsupported target: {target}"),
             }
         }
-        Command::Open { target } => run_tui(target)?,
+        Command::Open { target } => {
+            let target = target.or_else(|| {
+                jaringan_browser::config::load()
+                    .ok()
+                    .flatten()
+                    .and_then(|c| c.default_target)
+            });
+            run_tui(target)?
+        }
         Command::Gateway { command } => match command {
             GatewayCommand::ServeHttp {
                 http_listen,
@@ -522,6 +530,18 @@ fn run_app(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     target: Option<String>,
 ) -> anyhow::Result<()> {
+    // Load config
+    let cfg = jaringan_browser::config::load()
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+
+    // Apply data_dir override from config
+    if let Some(ref data_dir) = cfg.data_dir {
+        // SAFETY: single-threaded startup, no other code reads JARINGAN_DATA yet
+        unsafe { std::env::set_var("JARINGAN_DATA", data_dir); }
+    }
+
     let (first, page) = match target {
         Some(t) => {
             let loc = parse_start_location(&t)?;
@@ -541,7 +561,7 @@ fn run_app(
         }
     };
 
-    let mut state = BrowserState::new(first.clone());
+    let mut state = BrowserState::new(first.clone(), cfg);
     state.record_current(page.document.title().unwrap_or("Untitled"));
     let file_mtime = file_mtime_of(&page.location);
     let mut tabs = vec![Tab { page, state, file_mtime }];
@@ -619,7 +639,7 @@ fn handle_key_event(
                 signature_status: SignatureStatus::Unsigned,
                 stream_rx: None,
             };
-            let mut s = BrowserState::new(p.location.clone());
+            let mut s = BrowserState::new(p.location.clone(), Default::default());
             s.record_current(p.document.title().unwrap_or("Untitled"));
             tabs.push(Tab {
                 page: p,
@@ -875,6 +895,11 @@ fn draw_frame(
     let area = frame.area();
     frame.render_widget(Clear, area);
 
+    // Theme colours from config
+    let cfg = &tabs[active_tab].state.config;
+    let accent = parse_color(&cfg.theme.accent);
+    let border_color = parse_color(&cfg.theme.border);
+
     // Tab bar takes 1 line at the top
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -906,7 +931,7 @@ fn draw_frame(
     .block(
         TuiBlock::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan)),
+            .border_style(Style::default().fg(accent)),
     );
     frame.render_widget(header, main_chunks[1]);
 
@@ -915,7 +940,7 @@ fn draw_frame(
         .block(
             TuiBlock::default()
                 .borders(Borders::LEFT | Borders::RIGHT)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(border_color)),
         )
         .scroll((state.scroll_offset, 0))
         .wrap(Wrap { trim: false });
@@ -982,7 +1007,7 @@ fn draw_frame(
     .block(
         TuiBlock::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan)),
+            .border_style(Style::default().fg(accent)),
     );
     frame.render_widget(footer, main_chunks[3]);
 
@@ -2461,7 +2486,7 @@ mod tests {
             signature_status: SignatureStatus::Unsigned,
             stream_rx: None,
         };
-        let mut state = BrowserState::new(page.location.clone());
+        let mut state = BrowserState::new(page.location.clone(), Default::default());
         state.selected = 1;
 
         activate_selected(&mut state, &mut page).unwrap();
@@ -2503,7 +2528,7 @@ mod tests {
             signature_status: SignatureStatus::Unsigned,
             stream_rx: None,
         };
-        let mut state = BrowserState::new(page.location.clone());
+        let mut state = BrowserState::new(page.location.clone(), Default::default());
         state.selected = 1;
 
         activate_selected(&mut state, &mut page).unwrap();
@@ -2535,7 +2560,7 @@ mod tests {
             signature_status: SignatureStatus::Unsigned,
             stream_rx: None,
         };
-        let mut state = BrowserState::new(page.location.clone());
+        let mut state = BrowserState::new(page.location.clone(), Default::default());
 
         for _ in 0..5 {
             edit_selected_input(&mut state, &mut page, InputEdit::Backspace);
@@ -2621,7 +2646,7 @@ mod tests {
             signature_status: SignatureStatus::Unsigned,
             stream_rx: None,
         };
-        let mut state = BrowserState::new(page.location.clone());
+        let mut state = BrowserState::new(page.location.clone(), Default::default());
         state.selected = 1;
 
         activate_selected(&mut state, &mut page).unwrap();

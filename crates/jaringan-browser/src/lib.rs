@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::fs;
 
+pub mod config;
+
+use config::Config;
 use jaringan_protocol::JaringanUrl;
 
 /// Jaringan data directory under XDG_DATA_HOME (~/.local/share/jaringan/).
@@ -197,10 +200,11 @@ pub struct BrowserState {
     pub history: Vec<HistoryEntry>,
     pub bookmarks: Vec<Bookmark>,
     pub find_state: FindState,
+    pub config: Config,
 }
 
 impl BrowserState {
-    pub fn new(current: PageLocation) -> Self {
+    pub fn new(current: PageLocation, config: Config) -> Self {
         let history = load_history();
         let bookmarks = load_bookmarks();
         Self {
@@ -221,6 +225,7 @@ impl BrowserState {
                 matches: Vec::new(),
                 match_idx: 0,
             },
+            config,
         }
     }
 
@@ -479,7 +484,7 @@ mod tests {
     fn records_back_history_and_returns_to_previous_page() {
         let home = PageLocation::File(PathBuf::from("/tmp/site/index.jrg"));
         let about = PageLocation::File(PathBuf::from("/tmp/site/about.jrg"));
-        let mut state = BrowserState::new(home.clone());
+        let mut state = BrowserState::new(home.clone(), Config::default());
         navigate_to(&mut state, about.clone());
         assert_eq!(state.current, about);
         assert_eq!(state.back_stack, vec![home.clone()]);
@@ -491,7 +496,7 @@ mod tests {
     fn records_forward_history_when_going_back_and_forward() {
         let home = PageLocation::File(PathBuf::from("/tmp/site/index.jrg"));
         let about = PageLocation::File(PathBuf::from("/tmp/site/about.jrg"));
-        let mut state = BrowserState::new(home.clone());
+        let mut state = BrowserState::new(home.clone(), Config::default());
         navigate_to(&mut state, about.clone());
         assert!(go_back(&mut state));
         assert_eq!(state.current, home);
