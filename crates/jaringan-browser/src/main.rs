@@ -282,7 +282,7 @@ fn main() -> anyhow::Result<()> {
         Command::Init { path } => init_jrg_site(&path)?,
         Command::View { target, headers } => {
             let loc = parse_start_location(&target)?;
-            let page = load_location(&loc)?;
+            let page = load_location(&loc, &None)?;
 
             if headers {
                 println!("Location: {}", loc.display_url());
@@ -564,7 +564,7 @@ fn run_app(
     let (first, page) = match target {
         Some(t) => {
             let loc = parse_start_location(&t)?;
-            let p = load_location(&loc)?;
+            let p = load_location(&loc, &script_runtime)?;
             (p.location.clone(), p)
         }
         None => {
@@ -595,7 +595,7 @@ fn run_app(
                     PageLocation::Unsupported(saved.url.clone())
                 });
                 if matches!(loc, PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) {
-                    match load_location(&loc) {
+                    match load_location(&loc, &script_runtime) {
                         Ok(page) => {
                             let mut s = BrowserState::new(loc.clone(), cfg.clone());
                             s.record_current(page.document.title().unwrap_or("Untitled"));
@@ -645,7 +645,7 @@ fn run_app(
         if tab.state.config.live_reload {
             match &tab.page.location {
                 PageLocation::File(p) if p.is_file() || p.is_dir() => {
-                    check_live_reload(&mut tab.page, &mut tab.state, &mut tab.file_mtime);
+                    check_live_reload(&mut tab.page, &mut tab.state, &mut tab.file_mtime, &script_runtime);
                 }
                 _ => {}
             }
@@ -683,7 +683,7 @@ fn run_app(
 
         match event::read()? {
             Event::Key(key) => {
-                handle_key_event(&mut tabs, &mut active_tab, terminal, key)?;
+                handle_key_event(&mut tabs, &mut active_tab, terminal, key, &script_runtime)?;
             }
             Event::Resize(_, _) => {}
             _ => {}
@@ -697,6 +697,7 @@ fn handle_key_event(
     active_tab: &mut usize,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     key: crossterm::event::KeyEvent,
+    script_runtime: &Option<WasmRuntime>,
 ) -> anyhow::Result<()> {
     let ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
@@ -801,7 +802,7 @@ fn handle_key_event(
                     });
                     if matches!(location, PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) {
                         state.status = format!("⠋ Loading {url}");
-                        let loaded = load_location(&location)?;
+                        let loaded = load_location(&location, script_runtime)?;
                         navigate_to(state, loaded.location.clone());
                         state.record_current(loaded.document.title().unwrap_or("Untitled"));
                         state.status = "Opened from history".to_string();
@@ -936,14 +937,14 @@ fn handle_key_event(
             toggle_overlay(state, jaringan_browser::Overlay::PageInfo);
         }
         KeyCode::Enter => {
-            activate_selected(state, page)?;
+            activate_selected(state, page, script_runtime)?;
             *file_mtime = file_mtime_of(&page.location);
         }
         KeyCode::Char('b') | KeyCode::Backspace => {
             if go_back(state) {
                 match &state.current {
                     location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
-                        *page = load_location(location)?;
+                        *page = load_location(location, script_runtime)?;
                         *file_mtime = file_mtime_of(&page.location);
                         state.record_current(page.document.title().unwrap_or("Untitled"));
                     }
@@ -955,7 +956,7 @@ fn handle_key_event(
             if go_forward(state) {
                 match &state.current {
                     location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
-                        *page = load_location(location)?;
+                        *page = load_location(location, script_runtime)?;
                         *file_mtime = file_mtime_of(&page.location);
                         state.record_current(page.document.title().unwrap_or("Untitled"));
                     }
@@ -964,7 +965,7 @@ fn handle_key_event(
             }
         }
         KeyCode::Char('r') => {
-            *page = load_location(&page.location)?;
+            *page = load_location(&page.location, script_runtime)?;
             *file_mtime = file_mtime_of(&page.location);
             state.status = String::from("Reloaded");
         }
@@ -1181,7 +1182,7 @@ fn draw_tab_bar(frame: &mut ratatui::Frame<'_>, tabs: &[Tab], active_tab: usize,
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage) -> anyhow::Result<()> {
+fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage, script_runtime: &Option<WasmRuntime>) -> anyhow::Result<()> {
     let Some(item) = page.items.get(state.selected).cloned() else {
         state.status = String::from("No selectable item");
         return Ok(());
@@ -1191,7 +1192,7 @@ fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage) -> anyhow:
         InteractiveItem::Link { label, target } => match resolve_target(&page.location, &target) {
             location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
                 state.status = format!("⠋ Loading {}", location.display_url());
-                let loaded = load_location(&location)?;
+                let loaded = load_location(&location, script_runtime)?;
                 navigate_to(state, loaded.location.clone());
                 state.record_current(loaded.document.title().unwrap_or("Untitled"));
                 state.status = format!("Opened {label}");
@@ -1201,7 +1202,7 @@ fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage) -> anyhow:
                 state.status = format!("Unsupported target for now: {target}");
             }
         },
-        InteractiveItem::Button(action) => activate_button(state, page, action)?,
+        InteractiveItem::Button(action) => activate_button(state, page, action, script_runtime)?,
         InteractiveItem::Input(input) => {
             state.pending_confirmation = None;
             // Auto-submit: find the first Button on the page and activate it
@@ -1214,7 +1215,7 @@ fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage) -> anyhow:
             });
             if let Some(action) = button {
                 state.status = format!("Submitting form from input {0}...", input.name);
-                return activate_button(state, page, action);
+                return activate_button(state, page, action, script_runtime);
             }
             state.status = input_status(&input);
         }
@@ -1235,6 +1236,7 @@ fn activate_button(
     state: &mut BrowserState,
     page: &mut LoadedPage,
     action: ButtonAction,
+    script_runtime: &Option<WasmRuntime>,
 ) -> anyhow::Result<()> {
     let ButtonAction {
         id,
@@ -1271,7 +1273,8 @@ fn activate_button(
             } else {
                 post_tcp(&action_url, payload)?
             };
-            let document = document_from_response(&response)?;
+            let mut document = document_from_response(&response)?;
+            run_page_scripts(script_runtime, &mut document);
             navigate_to(state, PageLocation::Network(action_url));
             state.status = format!("Submitted POST action: {target_with_payload}");
             *page = LoadedPage {
@@ -1297,7 +1300,8 @@ fn activate_button(
                 request = request.with_action_token(token);
             }
             let response = resolver.fetch(&request)?;
-            let document = document_from_response(&response)?;
+            let mut document = document_from_response(&response)?;
+            run_page_scripts(script_runtime, &mut document);
             state.status = format!("Submitted local POST action: {target_with_payload}");
             *page = LoadedPage {
                 location: page.location.clone(),
@@ -1311,7 +1315,8 @@ fn activate_button(
             let root = current_file.parent().unwrap_or_else(|| Path::new("."));
             let query = payload_value(&payload, "q").unwrap_or_default();
             let index = build_local_search_index(root)?;
-            let document = local_search_results_document(&index, &query);
+            let mut document = local_search_results_document(&index, &query);
+            run_page_scripts(script_runtime, &mut document);
             state.status = format!("Searched local index for: {query}");
             *page = LoadedPage {
                 location: page.location.clone(),
@@ -1583,20 +1588,26 @@ fn run_page_scripts(runtime: &Option<WasmRuntime>, doc: &mut Document) {
     }
 }
 
-fn load_location(location: &PageLocation) -> anyhow::Result<LoadedPage> {
+fn load_location(
+    location: &PageLocation,
+    script_runtime: &Option<WasmRuntime>,
+) -> anyhow::Result<LoadedPage> {
     let keyring = default_keyring();
-    match location {
+    let mut page = match location {
         PageLocation::File(path) => {
             if path.is_dir() {
-                load_directory_page(path, &keyring)
+                load_directory_page(path, &keyring)?
             } else {
-                load_file_page_with_keyring(path, &keyring)
+                load_file_page_with_keyring(path, &keyring)?
             }
         }
-        PageLocation::Network(url) => load_network_page_with_keyring(url, &keyring),
-        PageLocation::Web(url) => load_web_page(url, &keyring),
+        PageLocation::Network(url) => load_network_page_with_keyring(url, &keyring)?,
+        PageLocation::Web(url) => load_web_page(url, &keyring)?,
         PageLocation::Unsupported(target) => bail!("unsupported target: {target}"),
-    }
+    };
+    run_page_scripts(script_runtime, &mut page.document);
+    page.items = collect_items(&page.document);
+    Ok(page)
 }
 
 fn load_web_page(url: &str, keyring: &PublicKeyring) -> anyhow::Result<LoadedPage> {
@@ -2717,6 +2728,7 @@ fn check_live_reload(
     page: &mut LoadedPage,
     state: &mut BrowserState,
     file_mtime: &mut Option<SystemTime>,
+    script_runtime: &Option<WasmRuntime>,
 ) {
     let Some(current_mtime) = file_mtime_of(&page.location) else {
         return;
@@ -2726,7 +2738,7 @@ fn check_live_reload(
         return;
     }
     *file_mtime = Some(current_mtime);
-    if let Ok(reloaded) = load_location(&page.location) {
+    if let Ok(reloaded) = load_location(&page.location, script_runtime) {
         *page = reloaded;
         state.record_current(page.document.title().unwrap_or("Untitled"));
         state.status = String::from("⚡ Reloaded (file changed)");

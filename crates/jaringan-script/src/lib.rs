@@ -209,7 +209,7 @@ pub fn blocks_to_script_blocks(blocks: &[jaringan_core::Block]) -> Vec<ScriptBlo
 
 /// Convert `ScriptBlock`s back to `jaringan_core::Block`s, dropping Script blocks.
 pub fn script_blocks_to_blocks(script_blocks: &[ScriptBlock]) -> Vec<jaringan_core::Block> {
-    use jaringan_core::{Block, Link, Button, Image, Input, Table, ActionMethod};
+    use jaringan_core::{Block, Link, Image, Table};
     script_blocks.iter().map(|sb| match sb {
         ScriptBlock::Heading { level, text } => Block::Heading { level: *level, text: text.clone() },
         ScriptBlock::Paragraph { text } => Block::Paragraph(text.clone()),
