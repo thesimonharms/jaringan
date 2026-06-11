@@ -1,0 +1,28 @@
+# Bridge Demo Page
+
+This page demonstrates the JRG-to-WASM native bridge.
+
+The inline WASM script below imports `jaringan.fetch` and `jaringan.log`.
+
+Currently it acts as an identity transform. To make real fetch calls,
+edit the WAT to call $fetch with a URL string.
+
+~> Bridge Script
+(module
+  (import "jaringan" "fetch" (func $fetch (param i32 i32) (result i32)))
+  (memory (export "memory") 2)
+  (func (export "process") (param $input_ptr i32) (param $input_len i32) (result i32)
+    (i32.store (i32.const 65536) (local.get $input_len))
+    (memory.copy (i32.const 65540) (local.get $input_ptr) (local.get $input_len))
+    (i32.const 65536)
+  )
+)
+~<
+
+=> bridge-fetcher.wat View the WAT source
+
+## Available host functions
+
+- `jaringan.fetch(url_ptr, url_len) -> i32` — Make a network request
+- `jaringan.log(level_ptr, level_len, msg_ptr, msg_len)` — Log a message
+- `jaringan.navigate(url_ptr, url_len) -> i32` — Navigate the browser
