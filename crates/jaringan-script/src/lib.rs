@@ -1,5 +1,8 @@
+pub mod bridge;
+
+use bridge::{read_string, write_error, write_json, BridgeState};
 use serde::{Deserialize, Serialize};
-use wasmtime::{Engine, Linker, Memory, Module, Store};
+use wasmtime::{AsContext, AsContextMut, Caller, Engine, Linker, Memory, Module, Store};
 
 /// A single input field for a script's UI form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,11 +111,122 @@ impl WasmRuntime {
         wasm_binary: &[u8],
         input: &ScriptInput,
     ) -> Result<ScriptOutput, WasmError> {
-        let mut store = Store::new(&self.engine, ());
-        let module = Module::new(&self.engine, wasm_binary)?;
-        let linker = Linker::new(&self.engine);
+        self.execute_with_bridge(wasm_binary, input, BridgeState::empty())
+    }
 
-        // Instantiate the module (no imports needed for basic scripts).
+    /// Execute a WASM module with a custom `BridgeState`.  The bridge lets the
+    /// WASM module import host functions (`jaringan.fetch`, `jaringan.log`,
+    /// `jaringan.navigate`) that the runtime can wire up to real I/O.
+    ///
+    /// Same export requirements as [`execute`].
+    pub fn execute_with_bridge(
+        &self,
+        wasm_binary: &[u8],
+        input: &ScriptInput,
+        bridge: BridgeState,
+    ) -> Result<ScriptOutput, WasmError> {
+        let mut store = Store::new(&self.engine, bridge);
+        let module = Module::new(&self.engine, wasm_binary)?;
+        let mut linker = Linker::new(&self.engine);
+
+        // ── Register host functions unconditionally ──────────────────────────
+        // The linker only resolves what the module actually imports, so it is
+        // safe (and simpler) to always register these.
+
+        // (import "jaringan" "fetch" (func (param i32 i32) (result i32)))
+        linker.func_wrap(
+            "jaringan",
+            "fetch",
+            |mut caller: Caller<'_, BridgeState>, url_ptr: i32, url_len: i32| -> i32 {
+                let mem = caller
+                    .get_export("memory")
+                    .and_then(|e| e.into_memory())
+                    .expect("memory export required for jaringan.fetch");
+
+                // Read the URL string from WASM memory.
+                let ctx = caller.as_context();
+                let url = read_string(&mem, &ctx, url_ptr, url_len);
+                drop(ctx);
+
+                let state = caller.data(); // &BridgeState
+
+                match state.fetch_fn {
+                    Some(ref fetch) => match fetch(&url) {
+                        Ok(result_json) => {
+                            let mut ctx = caller.as_context_mut();
+                            write_json(&mem, &mut ctx, &result_json)
+                        }
+                        Err(e) => {
+                            let mut ctx = caller.as_context_mut();
+                            write_error(&mem, &mut ctx, &e)
+                        }
+                    },
+                    None => {
+                        // No fetch function — return empty object.
+                        let mut ctx = caller.as_context_mut();
+                        write_json(&mem, &mut ctx, "{}")
+                    }
+                }
+            },
+        )?;
+
+        // (import "jaringan" "log" (func (param i32 i32 i32 i32)))
+        linker.func_wrap(
+            "jaringan",
+            "log",
+            |mut caller: Caller<'_, BridgeState>, level_ptr: i32, level_len: i32, msg_ptr: i32, msg_len: i32| {
+                let mem = caller
+                    .get_export("memory")
+                    .and_then(|e| e.into_memory())
+                    .expect("memory export required for jaringan.log");
+
+                let ctx = caller.as_context();
+                let level = read_string(&mem, &ctx, level_ptr, level_len);
+                let message = read_string(&mem, &ctx, msg_ptr, msg_len);
+                drop(ctx);
+
+                let state = caller.data();
+                if let Some(ref log) = state.log_fn {
+                    log(&level, &message);
+                }
+            },
+        )?;
+
+        // (import "jaringan" "navigate" (func (param i32 i32) (result i32)))
+        linker.func_wrap(
+            "jaringan",
+            "navigate",
+            |mut caller: Caller<'_, BridgeState>, url_ptr: i32, url_len: i32| -> i32 {
+                let mem = caller
+                    .get_export("memory")
+                    .and_then(|e| e.into_memory())
+                    .expect("memory export required for jaringan.navigate");
+
+                let ctx = caller.as_context();
+                let url = read_string(&mem, &ctx, url_ptr, url_len);
+                drop(ctx);
+
+                let state = caller.data();
+                match state.navigate_fn {
+                    Some(ref navigate) => match navigate(&url) {
+                        Ok(result_json) => {
+                            let mut ctx = caller.as_context_mut();
+                            write_json(&mem, &mut ctx, &result_json)
+                        }
+                        Err(e) => {
+                            let mut ctx = caller.as_context_mut();
+                            write_error(&mem, &mut ctx, &e)
+                        }
+                    },
+                    None => {
+                        let mut ctx = caller.as_context_mut();
+                        write_json(&mem, &mut ctx, "{}")
+                    }
+                }
+            },
+        )?;
+
+        // ── Instantiate ──────────────────────────────────────────────────────
         let instance = linker.instantiate(&mut store, &module)?;
 
         // Extract the exported memory.
@@ -149,8 +263,7 @@ impl WasmRuntime {
             .into_func()
             .ok_or_else(|| WasmError::MissingExport("process (expected Func)".into()))?;
 
-        let process_typed = process_func
-            .typed::<(i32, i32), i32>(&store)?;
+        let process_typed = process_func.typed::<(i32, i32), i32>(&store)?;
 
         let output_ptr = process_typed.call(&mut store, (0i32, input_len))?;
 
@@ -179,9 +292,8 @@ impl WasmRuntime {
             )));
         }
 
-        let output_json =
-            std::str::from_utf8(&mem_data[json_start..json_end])
-                .map_err(|e| WasmError::Memory(format!("output is not valid UTF-8: {}", e)))?;
+        let output_json = std::str::from_utf8(&mem_data[json_start..json_end])
+            .map_err(|e| WasmError::Memory(format!("output is not valid UTF-8: {}", e)))?;
 
         let output: ScriptOutput = serde_json::from_str(output_json)?;
         Ok(output)
