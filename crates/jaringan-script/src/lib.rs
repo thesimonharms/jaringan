@@ -303,4 +303,60 @@ mod tests {
         let output = runtime.execute(&wasm_binary, &input).unwrap();
         assert_eq!(output.blocks.len(), 1);
     }
+
+    #[test]
+    fn execute_wat_script_on_document() {
+        let wasm = wat::parse_str(IDENTITY_WAT).unwrap();
+        let runtime = WasmRuntime::new().unwrap();
+
+        // Simulate what execute_document_scripts does
+        let input = ScriptInput {
+            title: Some("Scripted Page".into()),
+            inputs: vec![ScriptInputField {
+                name: "username".into(),
+                label: "Name".into(),
+                value: Some("Simon".into()),
+                placeholder: None,
+            }],
+            metadata: None,
+            blocks: vec![
+                ScriptBlock::Heading { level: 1, text: "Scripted Page".into() },
+                ScriptBlock::Paragraph { text: "Hello from the other side".into() },
+            ],
+            tui: None,
+        };
+
+        let output = runtime.execute(&wasm, &input).unwrap();
+        assert_eq!(output.blocks.len(), 2, "identity should preserve block count");
+    }
+
+    #[test]
+    fn blocks_convert_back_and_forth() {
+        use jaringan_core::{Block, Link, Image, Table};
+
+        // Note: Block::Rule is intentionally excluded — it maps to a synthetic
+        // ScriptBlock::List rendering and cannot roundtrip faithfully.
+        let original = vec![
+            Block::Heading { level: 1, text: "Test".into() },
+            Block::Paragraph("Content".into()),
+            Block::Link(Link { target: "jrg://test".into(), label: "Test Link".into() }),
+            Block::Image(Image { source: "img.png".into(), alt: "An image".into() }),
+            Block::Quote("Cited text".into()),
+            Block::List(vec!["one".into(), "two".into()]),
+            Block::Table(Table {
+                headers: vec!["A".into()],
+                rows: vec![vec!["1".into()]],
+            }),
+            Block::Preformatted { code: "code".into(), language: None },
+        ];
+
+        let script_blocks = blocks_to_script_blocks(&original);
+        let back = script_blocks_to_blocks(&script_blocks);
+
+        assert_eq!(original.len(), back.len());
+        for (a, b) in original.iter().zip(back.iter()) {
+            // Check variant equality via debug formatting
+            assert_eq!(format!("{a:?}"), format!("{b:?}"));
+        }
+    }
 }
