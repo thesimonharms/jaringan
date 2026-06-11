@@ -4,6 +4,7 @@ members = [
     "crates/jaringan-core",
     "crates/jaringan-formatter",
     "crates/jaringan-gateway",
+    "crates/jaringan-plugins",
     "crates/jaringan-protocol",
     "crates/jaringan-render",
     "crates/jaringan-script",
@@ -35,6 +36,7 @@ url = "2.5"
 
 jaringan-core = { path = "crates/jaringan-core" }
 jaringan-gateway = { path = "crates/jaringan-gateway" }
+jaringan-plugins = { path = "crates/jaringan-plugins" }
 jaringan-protocol = { path = "crates/jaringan-protocol" }
 jaringan-render = { path = "crates/jaringan-render" }
 jaringan-script = { path = "crates/jaringan-script" }

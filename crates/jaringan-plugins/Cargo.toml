@@ -1,18 +1,15 @@
 [package]
-name = "jaringan-script"
+name = "jaringan-plugins"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-jaringan-core = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0"
-thiserror = { workspace = true }
 wasmtime = "28"
-
-[dev-dependencies]
-wat = "1"
+notify = "7"
+jaringan-script = { workspace = true }
 
 [lib]

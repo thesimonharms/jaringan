@@ -188,6 +188,87 @@ impl WasmRuntime {
     }
 }
 
+/// Convert a slice of `jaringan_core::Block` into the WASM-friendly `ScriptBlock` format.
+pub fn blocks_to_script_blocks(blocks: &[jaringan_core::Block]) -> Vec<ScriptBlock> {
+    use jaringan_core::Block;
+    blocks.iter().map(|b| match b {
+        Block::Heading { level, text } => ScriptBlock::Heading { level: *level, text: text.clone() },
+        Block::Paragraph(text) => ScriptBlock::Paragraph { text: text.clone() },
+        Block::Link(link) => ScriptBlock::Link { url: link.target.clone(), text: link.label.clone() },
+        Block::Input(i) => ScriptBlock::Paragraph { text: format!("{}: {}", i.label, i.value) },
+        Block::Button(b) => ScriptBlock::Paragraph { text: format!("◉ {} -> {}", b.label, b.target) },
+        Block::Image(img) => ScriptBlock::Image { url: img.source.clone(), alt: Some(img.alt.clone()) },
+        Block::Quote(text) => ScriptBlock::Quote { text: text.clone(), attribution: None },
+        Block::List(items) => ScriptBlock::List { items: items.clone(), ordered: false },
+        Block::Rule => ScriptBlock::List { items: vec!["───────────────".into()], ordered: false },
+        Block::Table(t) => ScriptBlock::Table { headers: t.headers.clone(), rows: t.rows.clone() },
+        Block::Preformatted { code, language } => ScriptBlock::Code { language: language.clone(), text: code.clone() },
+        Block::Script { wasm: _, label: _ } => ScriptBlock::Paragraph { text: "[script block]".into() },
+    }).collect()
+}
+
+/// Convert `ScriptBlock`s back to `jaringan_core::Block`s, dropping Script blocks.
+pub fn script_blocks_to_blocks(script_blocks: &[ScriptBlock]) -> Vec<jaringan_core::Block> {
+    use jaringan_core::{Block, Link, Button, Image, Input, Table, ActionMethod};
+    script_blocks.iter().map(|sb| match sb {
+        ScriptBlock::Heading { level, text } => Block::Heading { level: *level, text: text.clone() },
+        ScriptBlock::Paragraph { text } => Block::Paragraph(text.clone()),
+        ScriptBlock::Code { language, text } => Block::Preformatted { code: text.clone(), language: language.clone() },
+        ScriptBlock::List { items, .. } => Block::List(items.clone()),
+        ScriptBlock::Table { headers, rows } => Block::Table(Table { headers: headers.clone(), rows: rows.clone() }),
+        ScriptBlock::Image { url, alt } => Block::Image(Image { source: url.clone(), alt: alt.clone().unwrap_or_default() }),
+        ScriptBlock::Link { url, text } => Block::Link(Link { target: url.clone(), label: text.clone() }),
+        ScriptBlock::Quote { text, .. } => Block::Quote(text.clone()),
+    }).collect()
+}
+
+/// Run all WASM script blocks in a document against the document itself,
+/// returning the transformed blocks (with Script blocks consumed).
+pub fn execute_document_scripts(
+    runtime: &WasmRuntime,
+    doc: &jaringan_core::Document,
+) -> Result<Vec<jaringan_core::Block>, WasmError> {
+    use jaringan_core::Block;
+    // Gather indices of Script blocks
+    let script_indices: Vec<usize> = doc.blocks.iter().enumerate()
+        .filter_map(|(i, b)| matches!(b, jaringan_core::Block::Script { .. }).then_some(i))
+        .collect();
+
+    if script_indices.is_empty() {
+        return Ok(doc.blocks.clone());
+    }
+
+    let mut current_blocks = doc.blocks.clone();
+
+    for idx in &script_indices {
+        let Block::Script { wasm, label: _ } = &current_blocks[*idx] else { continue };
+
+        let script_blocks = blocks_to_script_blocks(&current_blocks);
+
+        let input = ScriptInput {
+            title: doc.title().map(|s| s.to_owned()),
+            inputs: current_blocks.iter().filter_map(|b| {
+                if let jaringan_core::Block::Input(i) = b {
+                    Some(ScriptInputField {
+                        name: i.name.clone(),
+                        label: i.label.clone(),
+                        value: Some(i.value.clone()),
+                        placeholder: i.placeholder.clone(),
+                    })
+                } else { None }
+            }).collect(),
+            metadata: None,
+            blocks: script_blocks,
+            tui: None,
+        };
+
+        let output = runtime.execute(wasm, &input)?;
+        current_blocks = script_blocks_to_blocks(&output.blocks);
+    }
+
+    Ok(current_blocks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

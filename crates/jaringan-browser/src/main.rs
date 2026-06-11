@@ -32,6 +32,7 @@ use jaringan_protocol::{
     post_tcp, post_tcp_with_action_token, serve, serve_encrypted,
 };
 use jaringan_render::render_plain;
+use jaringan_script::{WasmRuntime, execute_document_scripts};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -556,6 +557,9 @@ fn run_app(
         // SAFETY: single-threaded startup, no other code reads JARINGAN_DATA yet
         unsafe { std::env::set_var("JARINGAN_DATA", data_dir); }
     }
+
+    // Create a WASM runtime for page-level scripts
+    let script_runtime = WasmRuntime::new().ok();
 
     let (first, page) = match target {
         Some(t) => {
@@ -1560,6 +1564,22 @@ fn download_remote_image(url: &str) -> String {
         Ok(status) if status.success() => format!("Downloaded image: {}", output_path.display()),
         Ok(status) => format!("Image download failed with status: {status}"),
         Err(error) => format!("Image download requires curl: {error}"),
+    }
+}
+
+fn run_page_scripts(runtime: &Option<WasmRuntime>, doc: &mut Document) {
+    if let Some(rt) = runtime.as_ref() {
+        if doc.blocks.iter().any(|b| matches!(b, Block::Script { .. })) {
+            match execute_document_scripts(rt, doc) {
+                Ok(blocks) => {
+                    let meta = doc.metadata.take();
+                    *doc = Document::with_metadata(blocks, meta);
+                }
+                Err(e) => {
+                    eprintln!("[jaringan] WASM script error: {e}");
+                }
+            }
+        }
     }
 }
 
