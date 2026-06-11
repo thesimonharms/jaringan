@@ -31,8 +31,10 @@ use jaringan_protocol::{
     Request, Response, ResponseTag, StatusCode, fetch_tcp, fetch_tcp_encrypted, fetch_tcp_stream,
     post_tcp, post_tcp_with_action_token, serve, serve_encrypted,
 };
+use jaringan_plugins::PluginRegistry;
+use jaringan_plugins::plugin::PluginHook;
 use jaringan_render::render_plain;
-use jaringan_script::{WasmRuntime, execute_document_scripts};
+use jaringan_script::{ScriptInput, WasmRuntime, execute_document_scripts};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -561,6 +563,22 @@ fn run_app(
     // Create a WASM runtime for page-level scripts
     let script_runtime = WasmRuntime::new().ok();
 
+    // Initialize plugin registry from ~/.config/jaringan/plugins/
+    let plugins_dir = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/jaringan/plugins");
+    let mut plugin_registry = match PluginRegistry::new(&plugins_dir) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[jaringan] warning: plugin system init: {e}");
+            PluginRegistry::empty()
+        }
+    };
+    if let Err(e) = plugin_registry.load_all() {
+        eprintln!("[jaringan] warning: plugin loading: {e}");
+    }
+
     let (first, page) = match target {
         Some(t) => {
             let loc = parse_start_location(&t)?;
@@ -583,6 +601,16 @@ fn run_app(
     let mut state = BrowserState::new(first.clone(), cfg.clone());
     state.record_current(page.document.title().unwrap_or("Untitled"));
     let file_mtime = file_mtime_of(&page.location);
+
+    // Trigger OnPageLoad hook for initial page
+    let plugin_input = ScriptInput {
+        title: page.document.title().map(|s| s.to_owned()),
+        inputs: Vec::new(),
+        metadata: None,
+        blocks: Vec::new(),
+        tui: None,
+    };
+    plugin_registry.trigger_hook(&PluginHook::OnPageLoad, &plugin_input);
     let mut tabs: Vec<Tab>;
 
     // Restore persisted tabs if config has tab_persistence enabled
@@ -683,7 +711,7 @@ fn run_app(
 
         match event::read()? {
             Event::Key(key) => {
-                handle_key_event(&mut tabs, &mut active_tab, terminal, key, &script_runtime)?;
+                handle_key_event(&mut tabs, &mut active_tab, terminal, key, &script_runtime, &plugin_registry)?;
             }
             Event::Resize(_, _) => {}
             _ => {}
@@ -698,6 +726,7 @@ fn handle_key_event(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     key: crossterm::event::KeyEvent,
     script_runtime: &Option<WasmRuntime>,
+    plugin_registry: &PluginRegistry,
 ) -> anyhow::Result<()> {
     let ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
@@ -998,6 +1027,23 @@ fn handle_key_event(
         }
         _ => {}
     }
+
+    // Dispatch unhandled keys to plugins
+    let plugin_key_input = ScriptInput {
+        title: None,
+        inputs: Vec::new(),
+        metadata: None,
+        blocks: Vec::new(),
+        tui: Some(jaringan_script::TuiContext {
+            current_url: Some(page.location.display_url()),
+            current_title: page.document.title().map(|s| s.to_owned()),
+            scroll_offset: state.scroll_offset as u64,
+            selected_index: state.selected,
+            mode: format!("{:?}", state.mode),
+        }),
+    };
+    plugin_registry.trigger_hook(&PluginHook::OnKey, &plugin_key_input);
+
     // Write the cloned tab back (drop borrows first)
     tabs[*active_tab] = tab;
     Ok(())
@@ -2905,7 +2951,7 @@ mod tests {
         let mut state = BrowserState::new(page.location.clone(), Default::default());
         state.selected = 1;
 
-        activate_selected(&mut state, &mut page).unwrap();
+        activate_selected(&mut state, &mut page, &None).unwrap();
         assert_eq!(state.status, "Submit search? Press Enter again to confirm.");
         assert_eq!(
             state
@@ -2915,7 +2961,7 @@ mod tests {
             Some("search")
         );
 
-        activate_selected(&mut state, &mut page).unwrap();
+        activate_selected(&mut state, &mut page, &None).unwrap();
         assert_eq!(
             state.status,
             "Submitted local POST action: /actions/search?q=laksa"
@@ -2947,7 +2993,7 @@ mod tests {
         let mut state = BrowserState::new(page.location.clone(), Default::default());
         state.selected = 1;
 
-        activate_selected(&mut state, &mut page).unwrap();
+        activate_selected(&mut state, &mut page, &None).unwrap();
 
         assert_eq!(
             state.status,
@@ -3065,7 +3111,7 @@ mod tests {
         let mut state = BrowserState::new(page.location.clone(), Default::default());
         state.selected = 1;
 
-        activate_selected(&mut state, &mut page).unwrap();
+        activate_selected(&mut state, &mut page, &None).unwrap();
 
         assert_eq!(page.document.title(), Some("Search results for laksa"));
         assert_eq!(state.status, "Searched local index for: laksa");

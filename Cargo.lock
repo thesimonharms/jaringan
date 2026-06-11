@@ -1465,6 +1465,7 @@ dependencies = [
  "ed25519-dalek",
  "jaringan-core",
  "jaringan-gateway",
+ "jaringan-plugins",
  "jaringan-protocol",
  "jaringan-render",
  "jaringan-script",
