@@ -1,6 +1,6 @@
 pub mod bridge;
 
-use bridge::{read_string, write_error, write_json, BridgeState};
+pub use bridge::{BridgeState, read_string, write_error, write_json};
 use serde::{Deserialize, Serialize};
 use wasmtime::{AsContext, AsContextMut, Caller, Engine, Linker, Memory, Module, Store};
 
