@@ -12,4 +12,7 @@ wasmtime = "28"
 notify = "7"
 jaringan-script = { workspace = true }
 
+[dev-dependencies]
+wat = "1"
+
 [lib]

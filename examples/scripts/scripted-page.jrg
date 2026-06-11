@@ -1,0 +1,30 @@
+# Scripted Page Demo
+
+This page contains an inline WASM script that runs on every load.
+
+Below is a script block. It's currently an identity transform,
+so the page content is unchanged. Edit the WAT to experiment!
+
+~> Identity Script
+(module
+  (memory (export "memory") 2)
+  (func (export "process") (param i32 i32) (result i32)
+    (i32.store (i32.const 65536) (local.get 1))
+    (memory.copy (i32.const 65540) (i32.const 0) (local.get 1))
+    (i32.const 65536)
+  )
+)
+~<
+
+=> transform-counter.wat View the WAT source
+
+## How it works
+
+The `~>` marker starts an inline WASM script block. The block ends with `~<`.
+
+The script exports:
+- `memory` — at least 2 pages of linear memory
+- `process(input_ptr: i32, input_len: i32) -> i32` — receives and returns JSON
+
+The browser runs all Script blocks before rendering, passing the full page content
+as JSON and replacing it with whatever the script returns.

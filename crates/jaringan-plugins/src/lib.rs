@@ -140,3 +140,105 @@ impl PluginRegistry {
         &self.plugins
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn unique_temp_dir() -> PathBuf {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("jrg-test-{ts}"))
+    }
+
+    /// A minimal WAT plugin that registers with name "test" and OnPageLoad hook.
+    const PLUGIN_WAT: &str = r#"
+(module
+  (memory (export "memory") 1)
+  (func (export "register") (result i32)
+    i32.const 0
+  )
+  (data (i32.const 0) "\50\00\00\00")
+  (data (i32.const 4) "{\"name\":\"test\",\"version\":\"1.0\",\"hooks\":[{\"hook\":\"OnPageLoad\"}],\"keybindings\":[]}")
+)
+"#;
+
+    #[test]
+    fn loads_single_plugin_from_directory() {
+        let dir = unique_temp_dir();
+        let _ = fs::create_dir_all(&dir);
+
+        let wasm = wat::parse_str(PLUGIN_WAT).unwrap();
+        fs::write(dir.join("test-plugin.wasm"), &wasm).unwrap();
+
+        let mut registry = PluginRegistry::new(&dir).unwrap();
+        registry.load_all().unwrap();
+        assert_eq!(registry.plugins().len(), 1);
+        assert_eq!(registry.plugins()[0].registration.name, "test");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_registry_has_no_plugins() {
+        let dir = unique_temp_dir();
+        let _ = fs::create_dir_all(&dir);
+
+        let mut registry = PluginRegistry::new(&dir).unwrap();
+        registry.load_all().unwrap();
+        assert_eq!(registry.plugins().len(), 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_registry_creator() {
+        let registry = PluginRegistry::empty();
+        assert_eq!(registry.plugins().len(), 0);
+    }
+
+    #[test]
+    fn ignores_non_wasm_files() {
+        let dir = unique_temp_dir();
+        let _ = fs::create_dir_all(&dir);
+
+        // Create a non-wasm file
+        fs::write(dir.join("not-a-plugin.txt"), b"hello").unwrap();
+
+        let mut registry = PluginRegistry::new(&dir).unwrap();
+        registry.load_all().unwrap();
+        assert_eq!(registry.plugins().len(), 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trigger_hook_on_plugin() {
+        let dir = unique_temp_dir();
+        let _ = fs::create_dir_all(&dir);
+
+        let wasm = wat::parse_str(PLUGIN_WAT).unwrap();
+        fs::write(dir.join("test-plugin.wasm"), &wasm).unwrap();
+
+        let mut registry = PluginRegistry::new(&dir).unwrap();
+        registry.load_all().unwrap();
+
+        let input = ScriptInput {
+            title: Some("Test".into()),
+            inputs: vec![],
+            metadata: None,
+            blocks: vec![],
+            tui: None,
+        };
+
+        let results = registry.trigger_hook(&PluginHook::OnPageLoad, &input);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "test");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
