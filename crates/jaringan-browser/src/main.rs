@@ -34,7 +34,7 @@ use jaringan_protocol::{
 use jaringan_plugins::PluginRegistry;
 use jaringan_plugins::plugin::PluginHook;
 use jaringan_render::render_plain;
-use jaringan_script::{ScriptInput, WasmRuntime, execute_document_scripts};
+use jaringan_script::{BridgeState, ScriptInput, WasmRuntime, execute_document_scripts};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -597,6 +597,21 @@ fn run_app(
 
     // Create a WASM runtime for page-level scripts
     let script_runtime = WasmRuntime::new().ok();
+
+    // Create a bridge that lets WASM scripts call host functions
+    let bridge: Option<BridgeState> = Some(BridgeState {
+        fetch_fn: Some(std::sync::Arc::new(|url: &str| {
+            // TODO: implement real fetch via JRG resolver/gateway
+            Err(format!("bridge fetch not yet implemented for: {url}"))
+        })),
+        navigate_fn: Some(std::sync::Arc::new(|url: &str| {
+            eprintln!("[jaringan] bridge navigate: {url}");
+            Ok(r#"{}"#.into())
+        })),
+        log_fn: Some(std::sync::Arc::new(|level: &str, msg: &str| {
+            eprintln!("[jaringan:bridge/{level}] {msg}");
+        })),
+    });
 
     // Initialize plugin registry from ~/.config/jaringan/plugins/
     let plugins_dir = std::env::var_os("HOME")
@@ -1665,10 +1680,10 @@ fn download_remote_image(url: &str) -> String {
     }
 }
 
-fn run_page_scripts(runtime: &Option<WasmRuntime>, doc: &mut Document) {
+fn run_page_scripts(runtime: &Option<WasmRuntime>, doc: &mut Document, bridge: &Option<BridgeState>) {
     if let Some(rt) = runtime.as_ref() {
         if doc.blocks.iter().any(|b| matches!(b, Block::Script { .. })) {
-            match execute_document_scripts(rt, doc) {
+            match execute_document_scripts(rt, doc, bridge.as_ref()) {
                 Ok(blocks) => {
                     let meta = doc.metadata.take();
                     *doc = Document::with_metadata(blocks, meta);
@@ -1684,6 +1699,7 @@ fn run_page_scripts(runtime: &Option<WasmRuntime>, doc: &mut Document) {
 fn load_location(
     location: &PageLocation,
     script_runtime: &Option<WasmRuntime>,
+    bridge: &Option<BridgeState>,
 ) -> anyhow::Result<LoadedPage> {
     let keyring = default_keyring();
     let mut page = match location {
@@ -1698,7 +1714,7 @@ fn load_location(
         PageLocation::Web(url) => load_web_page(url, &keyring)?,
         PageLocation::Unsupported(target) => bail!("unsupported target: {target}"),
     };
-    run_page_scripts(script_runtime, &mut page.document);
+    run_page_scripts(script_runtime, &mut page.document, bridge);
     page.items = collect_items(&page.document);
     Ok(page)
 }

@@ -336,9 +336,14 @@ pub fn script_blocks_to_blocks(script_blocks: &[ScriptBlock]) -> Vec<jaringan_co
 
 /// Run all WASM script blocks in a document against the document itself,
 /// returning the transformed blocks (with Script blocks consumed).
+///
+/// When `bridge` is `Some`, scripts can invoke host functions (fetch, navigate,
+/// log) through the provided [`BridgeState`]; otherwise those imports fall back
+/// to no-ops.
 pub fn execute_document_scripts(
     runtime: &WasmRuntime,
     doc: &jaringan_core::Document,
+    bridge: Option<&BridgeState>,
 ) -> Result<Vec<jaringan_core::Block>, WasmError> {
     use jaringan_core::Block;
     // Gather indices of Script blocks
@@ -374,7 +379,11 @@ pub fn execute_document_scripts(
             tui: None,
         };
 
-        let output = runtime.execute(wasm, &input)?;
+        let output = if let Some(b) = bridge {
+            runtime.execute_with_bridge(wasm, &input, b.clone())?
+        } else {
+            runtime.execute(wasm, &input)?
+        };
         current_blocks = script_blocks_to_blocks(&output.blocks);
     }
 
@@ -393,6 +402,39 @@ mod tests {
     ;; write at offset 65536 (end of page 1)
     (i32.store (i32.const 65536) (local.get 1))
     (memory.copy (i32.const 65540) (i32.const 0) (local.get 1))
+    (i32.const 65536)
+  )
+)
+"#;
+
+    const BRIDGE_TEST_WAT: &str = r#"
+(module
+  (import "jaringan" "fetch" (func $fetch (param i32 i32) (result i32)))
+  (import "jaringan" "log" (func $log (param i32 i32 i32 i32)))
+  (import "jaringan" "navigate" (func $navigate (param i32 i32) (result i32)))
+  (memory (export "memory") 2)
+
+  ;; Store a URL string at offset 8000 for the test
+  (data (i32.const 8000) "jrg://example/test.jrg")
+  (data (i32.const 8022) "info")
+  (data (i32.const 8027) "Hello from WASM")
+
+  (func (export "process") (param $input_ptr i32) (param $input_len i32) (result i32)
+    ;; Call fetch with url at offset 8000, length 22
+    (call $fetch (i32.const 8000) (i32.const 22))
+    ;; Drop the result (just testing it doesn't crash)
+    drop
+
+    ;; Call log with level="info" at offset 8022, msg at offset 8027
+    (call $log (i32.const 8022) (i32.const 4) (i32.const 8027) (i32.const 15))
+
+    ;; Call navigate
+    (call $navigate (i32.const 8000) (i32.const 22))
+    drop
+
+    ;; Identity: return input as output
+    (i32.store (i32.const 65536) (local.get $input_len))
+    (memory.copy (i32.const 65540) (i32.const 0) (local.get $input_len))
     (i32.const 65536)
   )
 )
@@ -470,5 +512,43 @@ mod tests {
             // Check variant equality via debug formatting
             assert_eq!(format!("{a:?}"), format!("{b:?}"));
         }
+    }
+
+    #[test]
+    fn bridge_host_function_invoke() {
+        let wasm = wat::parse_str(BRIDGE_TEST_WAT).unwrap();
+        let runtime = WasmRuntime::new().unwrap();
+
+        let fetch_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fetch_called_clone = fetch_called.clone();
+        let log_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let log_called_clone = log_called.clone();
+
+        let bridge = bridge::BridgeState {
+            fetch_fn: Some(std::sync::Arc::new(move |url: &str| {
+                fetch_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(url, "jrg://example/test.jrg");
+                Ok(r#"{"status":200}"#.into())
+            })),
+            navigate_fn: Some(std::sync::Arc::new(|_url: &str| Ok(r#"{}"#.into()))),
+            log_fn: Some(std::sync::Arc::new(move |level: &str, msg: &str| {
+                log_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(level, "info");
+                assert_eq!(msg, "Hello from WASM");
+            })),
+        };
+
+        let input = ScriptInput {
+            title: Some("Bridge Test".into()),
+            inputs: vec![],
+            metadata: None,
+            blocks: vec![],
+            tui: None,
+        };
+
+        let output = runtime.execute_with_bridge(&wasm, &input, bridge).unwrap();
+        assert_eq!(output.blocks.len(), 0);
+        assert!(fetch_called.load(std::sync::atomic::Ordering::SeqCst), "fetch should have been called");
+        assert!(log_called.load(std::sync::atomic::Ordering::SeqCst), "log should have been called");
     }
 }

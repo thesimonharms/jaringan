@@ -1,10 +1,12 @@
+use std::sync::Arc;
 use wasmtime::{AsContext, AsContextMut, Memory};
 
 /// Holds optional closures that WASM scripts can call via imported host functions.
+#[derive(Clone)]
 pub struct BridgeState {
-    pub fetch_fn: Option<Box<dyn Fn(&str) -> Result<String, String> + Send + Sync>>,
-    pub navigate_fn: Option<Box<dyn Fn(&str) -> Result<String, String> + Send + Sync>>,
-    pub log_fn: Option<Box<dyn Fn(&str, &str) + Send + Sync>>,
+    pub fetch_fn: Option<Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>>,
+    pub navigate_fn: Option<Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>>,
+    pub log_fn: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
 }
 
 impl BridgeState {
