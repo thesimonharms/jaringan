@@ -1,0 +1,36 @@
+# Typography
+
+This page demonstrates all text formatting blocks in Jaringan.
+
+## Lists
+
+- First item
+- Second item
+- Third item
+
+## Blockquotes
+
+> This is a blockquote.
+> It spans multiple lines for effect.
+
+## Tables
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| Headings | Done | 3 levels |
+| Lists | Done | Bullet only |
+| Tables | Done | Pipe syntax |
+
+## Code
+
+```rust
+fn greet(name: &str) -> String {
+    format!("Hello, {name}!")
+}
+```
+
+=> ../index.jrg Back
+
+~~~
+title: Typography
+tags: example, typography

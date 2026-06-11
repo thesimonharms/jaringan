@@ -1,0 +1,17 @@
+# About
+
+This is a demonstration Jaringan site showcasing the full feature set.
+
+## Features
+
+- Multi-page navigation
+- Interactive forms
+- Search functionality
+- Streaming content
+- Digital signatures
+
+=> index.jrg Home
+
+~~~
+title: About
+tags: example, site, about

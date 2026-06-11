@@ -26,6 +26,23 @@ pub struct Config {
     #[serde(default = "default_history_limit")]
     pub history_limit: usize,
 
+    /// Enable rendering images via the Kitty terminal protocol.
+    /// When false, images show as `[image]` placeholders.
+    /// Requires a kitty-compatible terminal (kitty, WezTerm, etc.).
+    #[serde(default)]
+    pub render_images: bool,
+
+    /// Save and restore tabs across browser sessions.
+    /// When true, open tabs are persisted on quit and restored on next launch.
+    #[serde(default)]
+    pub tab_persistence: bool,
+
+    /// Enable live reloading of file-backed pages when the file changes on disk.
+    /// When true, the browser polls the file modification time every frame (120ms)
+    /// and automatically reloads when the file is updated.
+    #[serde(default = "default_live_reload")]
+    pub live_reload: bool,
+
     /// Theme colours for the TUI.
     #[serde(default)]
     pub theme: ThemeConfig,
@@ -41,6 +58,9 @@ impl Default for Config {
             default_target: None,
             data_dir: None,
             history_limit: default_history_limit(),
+            render_images: false,
+            tab_persistence: false,
+            live_reload: true,
             theme: ThemeConfig::default(),
             gateway: GatewayConfig::default(),
         }
@@ -67,6 +87,11 @@ pub struct ThemeConfig {
     /// Colour for the border of the content area.
     #[serde(default = "default_border")]
     pub border: String,
+
+    /// Background colour for find-match highlights in the page body.
+    /// Named colour or hex `#rrggbb`.
+    #[serde(default = "default_find_highlight")]
+    pub find_highlight: String,
 }
 
 impl Default for ThemeConfig {
@@ -76,6 +101,7 @@ impl Default for ThemeConfig {
             status_bg: None,
             selection: default_selection(),
             border: default_border(),
+            find_highlight: default_find_highlight(),
         }
     }
 }
@@ -112,6 +138,8 @@ fn default_history_limit() -> usize { 200 }
 fn default_accent() -> String { "cyan".to_owned() }
 fn default_selection() -> String { "yellow".to_owned() }
 fn default_border() -> String { "dark_gray".to_owned() }
+fn default_find_highlight() -> String { "light_yellow".to_owned() }
+fn default_live_reload() -> bool { true }
 fn default_jrg_host() -> String { "127.0.0.1:7070".to_owned() }
 fn default_timeout() -> u64 { 30 }
 

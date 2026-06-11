@@ -1,0 +1,30 @@
+# Signatures and Security
+
+## Page Signatures
+
+Jaringan supports ed25519 digital signatures for page authenticity.
+
+## Keyring
+
+Keys are stored in `~/.config/jaringan/keyring`:
+
+```
+my-server ed25519:BASE64PUBLICKEY...
+```
+
+## Signed Pages
+
+```
+~~~~~
+title: Signed Document
+signed-by: my-server
+signature: ed25519:BASE64SIGNATURE...
+```
+
+## Verification
+
+The browser shows signature status in the header.
+
+~~~
+title: Signatures and Security
+tags: guide, signatures

@@ -1,0 +1,12 @@
+# Blog
+
+## Latest Posts
+
+=> /posts/hello-world.jrg Hello, Jaringan!
+=> /posts/advanced.jrg Advanced Techniques
+
+=> ../index.jrg Home
+
+~~~
+title: Blog
+tags: example, site, blog

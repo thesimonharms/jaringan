@@ -1,0 +1,31 @@
+{
+  "name": "jaringan",
+  "displayName": "Jaringan",
+  "description": "Syntax highlighting for Jaringan (.jrg) files",
+  "version": "0.1.0",
+  "publisher": "jaringan",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "jaringan",
+        "aliases": ["Jaringan"],
+        "extensions": [".jrg"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "jaringan",
+        "scopeName": "source.jrg",
+        "path": "./syntaxes/jaringan.tmLanguage.json"
+      }
+    ]
+  }
+}

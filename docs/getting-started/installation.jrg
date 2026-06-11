@@ -1,0 +1,25 @@
+# Installation
+
+## From Source
+
+```
+git clone https://github.com/thesimonharms/jaringan
+cd jaringan
+cargo build --release
+cp target/release/jaringan-browser ~/.local/bin/
+```
+
+## Prerequisites
+
+- Rust 1.96+ (edition 2024)
+- cargo
+
+## Verify
+
+```
+jaringan-browser open .
+```
+
+~~~
+title: Installation
+tags: installation, setup

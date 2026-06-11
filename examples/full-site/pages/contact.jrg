@@ -1,0 +1,14 @@
+# Contact
+
+## Get in Touch
+
+? name label="Your Name" placeholder="Enter your name"
+? email label="Email" placeholder="your@email.com"
+? message label="Message" placeholder="Write your message..."
+! send label="Send Message" method="POST" target="/contact" confirm="Send this message?"
+
+=> ../index.jrg Home
+
+~~~
+title: Contact
+tags: example, site, contact

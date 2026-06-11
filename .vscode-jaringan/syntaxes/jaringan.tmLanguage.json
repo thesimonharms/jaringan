@@ -1,0 +1,158 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Jaringan",
+  "scopeName": "source.jrg",
+  "patterns": [
+    { "include": "#metadata-separator" },
+    { "include": "#metadata-keyvalue" },
+    { "include": "#block-comment" },
+    { "include": "#line-comment" },
+    { "include": "#fenced-code-block" },
+    { "include": "#heading" },
+    { "include": "#target-link" },
+    { "include": "#action-button" },
+    { "include": "#input-field" },
+    { "include": "#image-tag" },
+    { "include": "#list-item" },
+    { "include": "#quote" },
+    { "include": "#horizontal-rule" },
+    { "include": "#table-row" },
+    { "include": "#string" },
+    { "include": "#number" }
+  ],
+  "repository": {
+    "metadata-separator": {
+      "name": "meta.separator.jaringan",
+      "match": "^~~~~~\\s*$",
+      "captures": {
+        "0": { "name": "punctuation.definition.separator.jaringan" }
+      }
+    },
+    "metadata-keyvalue": {
+      "begin": "^~~~~~\\s*$",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.separator.jaringan" }
+      },
+      "end": "^(?=\\S)",
+      "patterns": [
+        {
+          "match": "^([a-zA-Z]\\w*)\\s*:\\s*(.*)$",
+          "captures": {
+            "1": { "name": "entity.other.attribute-name.jaringan" },
+            "2": { "name": "string.unquoted.jaringan" }
+          }
+        }
+      ]
+    },
+    "block-comment": {
+      "begin": "/\\*",
+      "end": "\\*/",
+      "name": "comment.block.jaringan"
+    },
+    "line-comment": {
+      "match": "//.*$",
+      "name": "comment.line.double-slash.jaringan"
+    },
+    "fenced-code-block": {
+      "begin": "^```(\\w*)$",
+      "beginCaptures": {
+        "1": { "name": "constant.language.fenced-code-language.jaringan" }
+      },
+      "end": "^```$",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.fenced-code-end.jaringan" }
+      },
+      "name": "markup.fenced-code-block.jaringan",
+      "patterns": [
+        {
+          "include": "source.${1:undefined}"
+        }
+      ]
+    },
+    "heading": {
+      "match": "^(#{1,6})\\s+(.*?)(\\s+#{1,6})?\\s*$",
+      "captures": {
+        "1": { "name": "punctuation.definition.heading.jaringan" },
+        "2": { "name": "entity.name.section.jaringan" },
+        "3": { "name": "punctuation.definition.heading.jaringan" }
+      }
+    },
+    "target-link": {
+      "match": "^=>\\s+(.*)$",
+      "captures": {
+        "1": { "name": "markup.link.jaringan" }
+      },
+      "name": "markup.link.jaringan"
+    },
+    "action-button": {
+      "match": "^!\\s+(.*)$",
+      "captures": {
+        "1": { "name": "string.unquoted.jaringan" }
+      },
+      "name": "keyword.control.action.jaringan"
+    },
+    "input-field": {
+      "match": "^\\?\\s+(.*)$",
+      "captures": {
+        "1": { "name": "string.unquoted.jaringan" }
+      },
+      "name": "keyword.control.input.jaringan"
+    },
+    "image-tag": {
+      "match": "^@\\s+(.*)$",
+      "captures": {
+        "1": { "name": "string.unquoted.jaringan" }
+      },
+      "name": "keyword.control.image.jaringan"
+    },
+    "list-item": {
+      "match": "^\\s*(-)\\s+(.*)$",
+      "captures": {
+        "1": { "name": "punctuation.definition.list.jaringan" },
+        "2": { "name": "markup.list.jaringan" }
+      }
+    },
+    "quote": {
+      "begin": "^>\\s*",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.quote.jaringan" }
+      },
+      "end": "$",
+      "name": "markup.quote.jaringan"
+    },
+    "horizontal-rule": {
+      "match": "^-{3,}\\s*$",
+      "name": "meta.separator.horizontal-rule.jaringan"
+    },
+    "table-row": {
+      "match": "^\\|(.+)\\|$",
+      "captures": {
+        "1": { "name": "markup.table.jaringan" }
+      }
+    },
+    "string": {
+      "patterns": [
+        {
+          "begin": "\"",
+          "end": "\"",
+          "name": "string.quoted.double.jaringan"
+        },
+        {
+          "begin": "'",
+          "end": "'",
+          "name": "string.quoted.single.jaringan"
+        },
+        {
+          "begin": "`",
+          "end": "`",
+          "name": "string.quoted.backtick.jaringan"
+        }
+      ]
+    },
+    "number": {
+      "match": "\\b-?(?:0x[0-9a-fA-F]+|0b[01]+|0o[0-7]+|[0-9]+(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\\b",
+      "name": "constant.numeric.jaringan"
+    }
+  },
+  "uuid": "f1a2b3c4-d5e6-7890-abcd-ef1234567890"
+}

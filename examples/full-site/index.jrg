@@ -1,0 +1,21 @@
+# Full Site Demo
+
+=> about.jrg About
+=> pages/blog.jrg Blog
+=> pages/contact.jrg Contact
+
+## Welcome
+
+This is a full Jaringan site demo with multiple pages, navigation, and interactive features.
+
+## Quick Start
+
+```
+jaringan-browser serve ./full-site 127.0.0.1:7070
+```
+
+Then open `jrg://127.0.0.1:7070/` in the browser.
+
+~~~
+title: Full Site Demo
+tags: example, site

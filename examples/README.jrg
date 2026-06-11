@@ -1,0 +1,37 @@
+# Jaringan Examples
+
+## Basic
+
+=> basic/hello-world.jrg Hello World — Simple page with headings, paragraphs, links
+=> basic/typography.jrg Typography — Lists, quotes, tables, code blocks
+
+## Interactive
+
+=> interactive/search-form.jrg Search Form — Input fields with search action
+=> interactive/guestbook.jrg Guestbook — Multi-input forms with confirmation
+=> interactive/todo.jrg TODO App — Action buttons with POST targets
+
+## Advanced
+
+=> advanced/streaming-demo.jrg Streaming Demo — Incremental content loading
+=> advanced/signed-page.jrg Signed Page — Digital signature verification
+
+## Full Site
+
+=> full-site/index.jrg Full Site Demo — Multi-page site with navigation
+
+## Usage
+
+Browse with the TUI:
+```
+jaringan-browser open examples/
+```
+
+Or serve over the protocol:
+```
+jaringan-browser serve examples/ 127.0.0.1:7070
+```
+
+~~~
+title: Examples README
+tags: examples, readme

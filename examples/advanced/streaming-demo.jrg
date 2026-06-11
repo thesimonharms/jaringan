@@ -1,0 +1,15 @@
+# Streaming Demo
+
+This page demonstrates streaming content. When served with a streaming-capable server, content blocks arrive incrementally.
+
+## Live Feed
+
+Streaming content will appear below as blocks arrive.
+
+> This is a static placeholder. Run with a streaming server to see live updates.
+
+=> ../index.jrg Back
+
+~
+title: Streaming Demo
+tags: example, advanced, streaming

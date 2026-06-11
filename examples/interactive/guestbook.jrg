@@ -1,0 +1,15 @@
+# Guestbook
+
+Leave a message in the guestbook!
+
+## Your Message
+
+? name label="Your Name" placeholder="Enter your name"
+? message label="Message" placeholder="Write something..."
+! submit label="Sign Guestbook" method="POST" target="/guestbook" confirm="Submit your message?"
+
+=> ../index.jrg Back
+
+~~~
+title: Guestbook
+tags: example, interactive, guestbook

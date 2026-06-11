@@ -67,6 +67,12 @@ pub fn jrg_response_to_http_response(
             ResponseTag::Stream => {
                 headers.push(("X-JRG-Stream".to_string(), "true".to_string()));
             }
+            ResponseTag::Key { key_id, key_base64 } => {
+                headers.push(("X-JRG-Key".to_string(), format!("{key_id} ed25519:{key_base64}")));
+            }
+            ResponseTag::ContentType { value } => {
+                headers.push(("X-JRG-Content-Type".to_string(), value));
+            }
         }
     }
 

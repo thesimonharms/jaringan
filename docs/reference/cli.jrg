@@ -1,0 +1,52 @@
+# CLI Reference
+
+## Commands
+
+### open
+Open a page in the interactive browser:
+```
+jaringan-browser open [path-or-url]
+```
+
+### serve
+Serve a directory over the JRG protocol:
+```
+jaringan-browser serve <root> --bind 127.0.0.1:7070
+```
+
+### get
+Fetch a JRG URL and print the response:
+```
+jaringan-browser get jrg://host/path --follow
+```
+
+### format
+Format .jrg files:
+```
+jaringan-format format [paths...] --check --indent 2
+```
+
+### lint
+Lint .jrg files:
+```
+jaringan-format lint [paths...] --json
+```
+
+### init
+Scaffold a new Jaringan site:
+```
+jaringan-browser init ./my-site
+```
+
+### view
+Render a page to stdout:
+```
+jaringan-browser view <target>
+```
+
+### gateway
+Run the HTTP-to-JRG or JRG-to-HTTP gateway.
+
+~~~
+title: CLI Reference
+tags: reference, cli

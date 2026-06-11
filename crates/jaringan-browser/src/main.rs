@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, bail};
+use base64::Engine;
 use clap::{Parser, Subcommand};
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -15,11 +16,11 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use jaringan_browser::{
-    ActionConfirmation, BrowserMode, BrowserState, PageLocation,
-    cache_filename_for_url, config::parse_color, go_back, go_forward, navigate_to, resolve_target, scroll_down,
-    scroll_page_down, scroll_page_up, scroll_to_bottom, scroll_to_top, scroll_up,
-    selection_down, selection_first, selection_last, selection_up, switch_mode,
-    toggle_mode, toggle_overlay, web_to_jrg_url,
+    ActionConfirmation, BrowserMode, BrowserState, FindState, PageLocation, SavedTab,
+    cache_filename_for_url, config::parse_color, go_back, go_forward, load_tabs, navigate_to,
+    resolve_target, save_tabs, scroll_down, scroll_page_down, scroll_page_up, scroll_to_bottom,
+    scroll_to_top, scroll_up, selection_down, selection_first, selection_last, selection_up,
+    switch_mode, toggle_mode, toggle_overlay, web_to_jrg_url,
 };
 use jaringan_core::{
     ActionMethod, Block, Document, Image, Input, PublicKeyring, SearchEntry, SearchIndex,
@@ -72,6 +73,9 @@ enum Command {
         /// Require encrypted TCP with this key id and JARINGAN_ENCRYPTION_KEY_HEX.
         #[arg(long)]
         encrypted_key_id: Option<String>,
+        /// Advertise this ed25519 key id in every response (key must be in keyring file).
+        #[arg(long)]
+        advertise_key: Option<String>,
     },
     /// Print a local search index of all .jrg pages under a root.
     Index {
@@ -235,6 +239,7 @@ fn main() -> anyhow::Result<()> {
             root,
             bind,
             encrypted_key_id,
+            advertise_key,
         } => {
             let listener = TcpListener::bind(&bind)
                 .with_context(|| format!("failed to bind Jaringan server to {bind}"))?;
@@ -242,6 +247,11 @@ fn main() -> anyhow::Result<()> {
                 let config = encrypted_tcp_config_from_env(&key_id)?;
                 eprintln!("serving encrypted {} at jrg://{bind}/", root.display());
                 serve_encrypted(listener, LocalFileResolver::new(root), &config)?;
+            } else if let Some(key_id) = advertise_key {
+                let key_base64 = lookup_keyring_key(&key_id)?;
+                let resolver = LocalFileResolver::new_with_key(root.clone(), key_id, key_base64);
+                eprintln!("serving {} at jrg://{bind}/ (advertising key)", root.display());
+                serve(listener, resolver)?;
             } else {
                 eprintln!("serving {} at jrg://{bind}/", root.display());
                 serve(listener, LocalFileResolver::new(root))?;
@@ -342,6 +352,7 @@ fn main() -> anyhow::Result<()> {
                         jrg_host,
                         enable_http_bridge,
                         timeout_secs: timeout,
+                        ..Default::default()
                     };
                     let gateway = jaringan_gateway::HttpToJrgGateway::new(config);
                     eprintln!("Starting HTTP→JRG gateway...");
@@ -390,6 +401,10 @@ fn print_response(response: Response) {
         match tag {
             ResponseTag::Redirect { target } => println!("Tag-Redirect: {target}"),
             ResponseTag::Stream => println!("Tag-Stream: true"),
+            ResponseTag::Key { key_id, key_base64 } => {
+                println!("Tag-Key: {key_id} ed25519:{key_base64}")
+            }
+            ResponseTag::ContentType { value } => println!("Tag-ContentType: {value}"),
         }
     }
     println!();
@@ -561,10 +576,59 @@ fn run_app(
         }
     };
 
-    let mut state = BrowserState::new(first.clone(), cfg);
+    let mut state = BrowserState::new(first.clone(), cfg.clone());
     state.record_current(page.document.title().unwrap_or("Untitled"));
     let file_mtime = file_mtime_of(&page.location);
-    let mut tabs = vec![Tab { page, state, file_mtime }];
+    let mut tabs: Vec<Tab>;
+
+    // Restore persisted tabs if config has tab_persistence enabled
+    if cfg.tab_persistence {
+        let saved_tabs = load_tabs();
+        if !saved_tabs.is_empty() {
+            tabs = Vec::new();
+            for saved in &saved_tabs {
+                let loc = parse_start_location(&saved.url).unwrap_or_else(|_| {
+                    PageLocation::Unsupported(saved.url.clone())
+                });
+                if matches!(loc, PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) {
+                    match load_location(&loc) {
+                        Ok(page) => {
+                            let mut s = BrowserState::new(loc.clone(), cfg.clone());
+                            s.record_current(page.document.title().unwrap_or("Untitled"));
+                            tabs.push(Tab {
+                                page,
+                                state: s,
+                                file_mtime: file_mtime_of(&loc),
+                            });
+                        }
+                        Err(_) => {
+                            let doc = Document::new(vec![Block::Preformatted {
+                                code: format!("Unable to load: {}", saved.url),
+                                language: None,
+                            }]);
+                            let page = LoadedPage {
+                                location: loc.clone(),
+                                items: collect_items(&doc),
+                                document: doc,
+                                signature_status: SignatureStatus::Unsigned,
+                                stream_rx: None,
+                            };
+                            let s = BrowserState::new(loc, cfg.clone());
+                            tabs.push(Tab { page, state: s, file_mtime: None });
+                        }
+                    }
+                }
+            }
+            // Ensure at least one tab
+            if tabs.is_empty() {
+                tabs = vec![Tab { page, state, file_mtime }];
+            }
+        } else {
+            tabs = vec![Tab { page, state, file_mtime }];
+        }
+    } else {
+        tabs = vec![Tab { page, state, file_mtime }];
+    }
     let mut active_tab: usize = 0;
     let started = Instant::now();
 
@@ -573,9 +637,14 @@ fn run_app(
         let mut tab = tabs[active_tab].clone();
         clamp_selection(&mut tab.state, tab.page.items.len());
 
-        // Live reload for file-backed pages
-        if matches!(tab.page.location, PageLocation::File(ref p) if p.is_file()) {
-            check_live_reload(&mut tab.page, &mut tab.state, &mut tab.file_mtime);
+        // Live reload for file-backed pages (files and directories)
+        if tab.state.config.live_reload {
+            match &tab.page.location {
+                PageLocation::File(p) if p.is_file() || p.is_dir() => {
+                    check_live_reload(&mut tab.page, &mut tab.state, &mut tab.file_mtime);
+                }
+                _ => {}
+            }
         }
 
         // Streaming blocks
@@ -743,12 +812,24 @@ fn handle_key_event(
                     // ignore control chars in find input
                 } else {
                     state.find_state.query.push(ch);
+                    state.find_state.matches = compute_find_matches(page, &state.find_state.query);
+                    state.find_state.match_idx = if state.find_state.matches.is_empty() {
+                        0
+                    } else {
+                        0
+                    };
                 }
             }
             KeyCode::Backspace
                 if matches!(state.overlay, Some(jaringan_browser::Overlay::Find)) =>
             {
                 state.find_state.query.pop();
+                state.find_state.matches = compute_find_matches(page, &state.find_state.query);
+                state.find_state.match_idx = if state.find_state.matches.is_empty() {
+                    0
+                } else {
+                    0
+                };
             }
             _ => {}
         }
@@ -758,6 +839,22 @@ fn handle_key_event(
     // ── Main keybindings ──────────────────────────────────────────
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => {
+            // Save tabs before quitting if persistence enabled
+            if state.config.tab_persistence {
+                let saved: Vec<SavedTab> = tabs
+                    .iter()
+                    .map(|t| SavedTab {
+                        url: t.page.location.display_url(),
+                        title: t
+                            .page
+                            .document
+                            .title()
+                            .unwrap_or("Untitled")
+                            .to_owned(),
+                    })
+                    .collect();
+                save_tabs(&saved);
+            }
             // quit
             return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "quit").into());
         }
@@ -787,7 +884,7 @@ fn handle_key_event(
         KeyCode::Down | KeyCode::Char('j') => match state.mode {
             BrowserMode::Selection => selection_down(state, page.items.len()),
             BrowserMode::Scroll => {
-                let line_count = render_lines(page, state.selected).len();
+                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state)).len();
                 if let Ok(size) = terminal.size() {
                     let viewport_height = size.height.saturating_sub(8);
                     scroll_down(state, line_count, viewport_height);
@@ -801,7 +898,7 @@ fn handle_key_event(
         KeyCode::PageDown | KeyCode::Char(' ') => match state.mode {
             BrowserMode::Selection => selection_down(state, page.items.len()),
             BrowserMode::Scroll => {
-                let line_count = render_lines(page, state.selected).len();
+                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state)).len();
                 if let Ok(size) = terminal.size() {
                     let viewport_height = size.height.saturating_sub(8);
                     scroll_page_down(state, line_count, viewport_height);
@@ -811,7 +908,7 @@ fn handle_key_event(
         KeyCode::PageUp => match state.mode {
             BrowserMode::Selection => selection_up(state),
             BrowserMode::Scroll => {
-                let line_count = render_lines(page, state.selected).len();
+                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state)).len();
                 if let Ok(size) = terminal.size() {
                     let viewport_height = size.height.saturating_sub(8);
                     scroll_page_up(state, line_count, viewport_height);
@@ -822,7 +919,7 @@ fn handle_key_event(
         KeyCode::End => selection_last(state, page.items.len()),
         KeyCode::Char('g') => scroll_to_top(state),
         KeyCode::Char('G') => {
-            let line_count = render_lines(page, state.selected).len();
+            let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state)).len();
             if let Ok(size) = terminal.size() {
                 let viewport_height = size.height.saturating_sub(8);
                 scroll_to_bottom(state, line_count, viewport_height);
@@ -830,6 +927,9 @@ fn handle_key_event(
         }
         KeyCode::Char('d') if ctrl => {
             state.toggle_bookmark_current(page.document.title().unwrap_or("Untitled"));
+        }
+        KeyCode::Char('i') if ctrl => {
+            toggle_overlay(state, jaringan_browser::Overlay::PageInfo);
         }
         KeyCode::Enter => {
             activate_selected(state, page)?;
@@ -869,6 +969,21 @@ fn handle_key_event(
             if !state.find_state.matches.is_empty() {
                 state.find_state.match_idx =
                     (state.find_state.match_idx + 1) % state.find_state.matches.len();
+                state.status = format!(
+                    "Match {}/{}",
+                    state.find_state.match_idx + 1,
+                    state.find_state.matches.len()
+                );
+            }
+        }
+        KeyCode::Char('p') if ctrl && state.overlay == Some(jaringan_browser::Overlay::Find) => {
+            // Previous match in find mode
+            if !state.find_state.matches.is_empty() {
+                state.find_state.match_idx = if state.find_state.match_idx == 0 {
+                    state.find_state.matches.len() - 1
+                } else {
+                    state.find_state.match_idx - 1
+                };
                 state.status = format!(
                     "Match {}/{}",
                     state.find_state.match_idx + 1,
@@ -936,7 +1051,8 @@ fn draw_frame(
     frame.render_widget(header, main_chunks[1]);
 
     // ── Body ───────────────────────────────────────────────────────
-    let body = Paragraph::new(render_lines(page, state.selected))
+    let find_color = parse_color(&cfg.theme.find_highlight);
+    let body = Paragraph::new(render_lines(page, state.selected, &state.find_state, find_color))
         .block(
             TuiBlock::default()
                 .borders(Borders::LEFT | Borders::RIGHT)
@@ -957,7 +1073,7 @@ fn draw_frame(
         BrowserMode::Scroll => Color::Yellow,
     };
 
-    let line_count = render_lines(page, state.selected).len();
+    let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state)).len();
     let viewport_height = main_chunks[2].height.saturating_sub(2);
     let pct = if line_count > viewport_height as usize {
         ((state.scroll_offset as f64)
@@ -969,7 +1085,7 @@ fn draw_frame(
 
     let help_text = if state.overlay == Some(jaringan_browser::Overlay::Find) {
         format!(
-            "Find: {}  ({}/{})  Ctrl+n next • Esc close",
+            "Find: {}  ({}/{})  Ctrl+n next • Ctrl+p prev • Esc close",
             state.find_state.query,
             if state.find_state.matches.is_empty() {
                 0
@@ -979,7 +1095,7 @@ fn draw_frame(
             state.find_state.matches.len(),
         )
     } else {
-        "j/k ↓↑ • Enter ↵ • H history • B bookmarks • Ctrl+f find • Ctrl+t tab • ? help • q quit"
+        "j/k ↓↑ • Enter ↵ • H history • B bookmarks • Ctrl+f find • Ctrl+i info • Ctrl+t tab • ? help • q quit"
             .to_string()
     };
 
@@ -1017,6 +1133,9 @@ fn draw_frame(
         Some(jaringan_browser::Overlay::History) => draw_history_overlay(frame, state),
         Some(jaringan_browser::Overlay::Bookmarks) => draw_bookmarks_overlay(frame, state),
         Some(jaringan_browser::Overlay::Find) => draw_find_overlay(frame, state),
+        Some(jaringan_browser::Overlay::PageInfo) => {
+            draw_page_info_overlay(frame, state, page)
+        }
         None => {}
     }
 }
@@ -1026,12 +1145,15 @@ fn draw_tab_bar(frame: &mut ratatui::Frame<'_>, tabs: &[Tab], active_tab: usize,
     let mut spans = Vec::new();
     for (i, tab) in tabs.iter().enumerate() {
         let title = tab.page.document.title().unwrap_or("Untitled");
+        let is_watching = tab.state.config.live_reload
+            && matches!(&tab.page.location, PageLocation::File(p) if p.is_file() || p.is_dir());
+        let watch_mark = if is_watching { " ◉" } else { "" };
         let label = if tab.page.location == PageLocation::File(PathBuf::from("welcome")) {
-            format!(" Welcome ")
+            format!(" Welcome{watch_mark} ")
         } else if title.len() > 20 {
-            format!(" {}… ", &title[..18])
+            format!(" {}…{watch_mark} ", &title[..18])
         } else {
-            format!(" {title} ")
+            format!(" {title}{watch_mark} ")
         };
         let style = if i == active_tab {
             Style::default()
@@ -1078,11 +1200,27 @@ fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage) -> anyhow:
         InteractiveItem::Button(action) => activate_button(state, page, action)?,
         InteractiveItem::Input(input) => {
             state.pending_confirmation = None;
+            // Auto-submit: find the first Button on the page and activate it
+            let button = page.items.iter().find_map(|item| {
+                if let InteractiveItem::Button(action) = item {
+                    Some(action.clone())
+                } else {
+                    None
+                }
+            });
+            if let Some(action) = button {
+                state.status = format!("Submitting form from input {0}...", input.name);
+                return activate_button(state, page, action);
+            }
             state.status = input_status(&input);
         }
-        InteractiveItem::Image(image) => {
+        InteractiveItem::Image(ref image) => {
             state.pending_confirmation = None;
-            state.status = image_status(&page.location, &image);
+            if state.config.render_images {
+                state.status = render_activated_image(&page.location, image);
+            } else {
+                state.status = image_status(&page.location, image);
+            }
         }
     }
 
@@ -1140,9 +1278,15 @@ fn activate_button(
                 stream_rx: None,
             };
         }
-        (PageLocation::File(current_file), ActionMethod::Post) if target.starts_with("/") => {
+        (PageLocation::File(current_file), ActionMethod::Post) => {
             let root = current_file.parent().unwrap_or_else(|| Path::new("."));
-            let action_url = JaringanUrl::parse(&format!("jrg://localhost{target}"))?;
+            let resolved_target = if target.starts_with("/") {
+                format!("jrg://localhost{target}")
+            } else {
+                format!("jrg://localhost/{}", target.trim_start_matches("./"))
+            };
+            let action_url = JaringanUrl::parse(&resolved_target)
+                .with_context(|| format!("bad action target `{target}`"))?;
             let resolver = LocalFileResolver::new(root);
             let mut request = Request::post(action_url, payload);
             if let Some(token) = auth.as_deref() {
@@ -1311,6 +1455,62 @@ fn input_status(input: &Input) -> String {
         &input.value
     };
     format!("Input {} = {}", input.name, value)
+}
+
+/// Show an image using the Kitty terminal protocol.
+/// Requires a kitty-compatible terminal (kitty, WezTerm, ghostty, etc.).
+fn render_image_kitty(path: &Path) -> String {
+    let data = match fs::read(path) {
+        Ok(d) => d,
+        Err(e) => return format!("Failed to read image: {e}"),
+    };
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    // Kitty protocol: transmit and place at cursor, auto-detect format
+    // a=T = transmit, f=100 = auto-detect format from header, d=1 = keep in memory
+    print!("\x1b_Ga=T,f=100,d=1;{}\x1b\\", b64);
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    format!("🖼 Displayed image ({}) via kitty protocol", path.display())
+}
+
+/// Render an image when the user activates it with render_images enabled.
+/// Downloads remote images first, then displays via kitty protocol.
+fn render_activated_image(page_location: &PageLocation, image: &Image) -> String {
+    let local_path = if image.source.starts_with("http://") || image.source.starts_with("https://") {
+        let cache_dir = PathBuf::from(
+            std::env::var_os("HOME")
+                .unwrap_or_else(|| std::ffi::OsString::from("/tmp")),
+        )
+        .join(".cache/jaringan/images");
+        if let Err(e) = fs::create_dir_all(&cache_dir) {
+            return format!("Could not create image cache: {e}");
+        }
+        let output_path = cache_dir.join(cache_filename_for_url(&image.source));
+        let status = std::process::Command::new("curl")
+            .args(["--fail", "--location", "--silent", "--show-error", "--output"])
+            .arg(&output_path)
+            .arg(&image.source)
+            .status();
+        match status {
+            Ok(s) if s.success() => output_path,
+            Ok(s) => return format!("Image download failed with status: {s}"),
+            Err(e) => return format!("Image download requires curl: {e}"),
+        }
+    } else {
+        let PageLocation::File(page_path) = page_location else {
+            return image_status(page_location, image);
+        };
+        page_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(&image.source)
+    };
+
+    if local_path.exists() {
+        render_image_kitty(&local_path)
+    } else {
+        format!("Image missing: {}", local_path.display())
+    }
 }
 
 fn image_status(page_location: &PageLocation, image: &Image) -> String {
@@ -1523,7 +1723,7 @@ fn load_network_page_with_keyring(
 fn redirect_target(response: &Response) -> Option<&str> {
     response.tags.iter().find_map(|tag| match tag {
         ResponseTag::Redirect { target } => Some(target.as_str()),
-        ResponseTag::Stream => None,
+        ResponseTag::Stream | ResponseTag::Key { .. } | ResponseTag::ContentType { .. } => None,
     })
 }
 
@@ -1609,6 +1809,30 @@ fn load_keyring_file(path: &Path) -> anyhow::Result<PublicKeyring> {
     PublicKeyring::from_text(&source)
         .map_err(anyhow::Error::msg)
         .with_context(|| format!("failed to parse keyring {}", path.display()))
+}
+
+/// Look up an ed25519 public key from the keyring file by key id.
+fn lookup_keyring_key(key_id: &str) -> anyhow::Result<String> {
+    let path = default_keyring_path();
+    if !path.exists() {
+        bail!("keyring not found at {}. Use `jaringan-browser generate-key` first.", path.display());
+    }
+    let source = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read keyring {}", path.display()))?;
+    for line in source.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() == 2 && parts[0] == key_id {
+            if let Some(key_base64) = parts[1].strip_prefix("ed25519:") {
+                return Ok(key_base64.to_owned());
+            }
+            bail!("key `{key_id}` has unknown format in keyring");
+        }
+    }
+    bail!("key `{key_id}` not found in keyring at {}", path.display());
 }
 
 fn security_label(status: &SignatureStatus) -> String {
@@ -1792,7 +2016,89 @@ fn draw_find_overlay(frame: &mut ratatui::Frame<'_>, state: &BrowserState) {
     frame.render_widget(block, overlay_area[1]);
 }
 
-fn render_lines(page: &LoadedPage, selected: usize) -> Vec<Line<'static>> {
+/// Scan rendered line text for a query and return the line indices that match.
+fn compute_find_matches(page: &LoadedPage, query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let q = query.to_lowercase();
+    // Use a dummy find state to get unhighlighted lines
+    let dummy = FindState {
+        query: String::new(),
+        matches: Vec::new(),
+        match_idx: 0,
+    };
+    let lines = render_lines(page, 0, &dummy, Color::Reset);
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            text.to_lowercase().contains(&q)
+        })
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+/// Draw the page info overlay — metadata about the current page.
+fn draw_page_info_overlay(
+    frame: &mut ratatui::Frame<'_>,
+    state: &BrowserState,
+    page: &LoadedPage,
+) {
+    let area = frame.area();
+    let overlay_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Max(area.height.saturating_sub(4)),
+        ])
+        .split(area);
+
+    let title = page.document.title().unwrap_or("Untitled");
+    let url = state.current.display_url();
+    let sig = security_label(&page.signature_status);
+    let block_count = page.document.blocks.len();
+    let item_count = page.items.len();
+    let dummy = FindState {
+        query: String::new(),
+        matches: Vec::new(),
+        match_idx: 0,
+    };
+    let line_count = render_lines(page, state.selected, &dummy, Color::Reset).len();
+
+    let text = format!(
+        "  Title: {title}\n  \
+         URL: {url}\n  \n  \
+         Content: Jaringan Page\n  \
+         Blocks: {block_count}  |  Items: {item_count}  |  Lines: {line_count}\n  \
+         Security: {sig}\n  \n  \
+         Mode: {mode}\n  \
+         Scroll: {scroll}/{max}\n  \n  \
+         Press Esc/i to close",
+        mode = match state.mode {
+            BrowserMode::Selection => "Selection",
+            BrowserMode::Scroll => "Scroll",
+        },
+        scroll = state.scroll_offset,
+        max = line_count.saturating_sub(1).max(0),
+    );
+
+    let block = Paragraph::new(text)
+        .block(
+            TuiBlock::default()
+                .title(" ℹ Page Info ")
+                .title_alignment(ratatui::layout::Alignment::Center)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Blue).bold()),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, overlay_area[1]);
+    frame.render_widget(block, overlay_area[1]);
+}
+
+fn render_lines(page: &LoadedPage, selected: usize, find_state: &FindState, find_color: Color) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut item_index = 0usize;
 
@@ -1907,7 +2213,57 @@ fn render_lines(page: &LoadedPage, selected: usize) -> Vec<Line<'static>> {
         }
     }
 
+    apply_find_highlights(&mut lines, find_state, find_color);
     lines
+}
+
+/// Apply find-match highlighting to rendered lines.
+/// Lines that match the query get a background color; the current match
+/// gets a more intense (bold + high-contrast) style.
+fn apply_find_highlights(
+    lines: &mut [Line<'static>],
+    find_state: &FindState,
+    find_color: Color,
+) {
+    if find_state.query.is_empty() || find_state.matches.is_empty() {
+        return;
+    }
+    for (line_idx, line) in lines.iter_mut().enumerate() {
+        let is_match = find_state.matches.contains(&line_idx);
+        let is_current = find_state
+            .matches
+            .get(find_state.match_idx)
+            .is_some_and(|&m| m == line_idx);
+
+        if !is_match {
+            continue;
+        }
+
+        if is_current {
+            // Current match: bold with high-contrast
+            for span in &mut line.spans {
+                let style = span.style;
+                span.style = style
+                    .bg(Color::Yellow)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD);
+            }
+        } else {
+            // Other matches: subtle background highlight
+            for span in &mut line.spans {
+                let style = span.style;
+                // Only apply background if the span doesn't already have one
+                if !has_bg_color(&style) {
+                    span.style = style.bg(find_color);
+                }
+            }
+        }
+    }
+}
+
+/// Check if a ratatui Style has any background color set.
+fn has_bg_color(style: &Style) -> bool {
+    style.bg.is_some()
 }
 
 fn render_browser_table(table: &Table) -> Vec<Line<'static>> {
@@ -1990,6 +2346,11 @@ fn clamp_selection(state: &mut BrowserState, item_count: usize) {
     } else if state.selected >= item_count {
         state.selected = item_count - 1;
     }
+}
+
+/// Extract the find highlight color from the browser state's config.
+fn find_color_for(state: &BrowserState) -> Color {
+    parse_color(&state.config.theme.find_highlight)
 }
 
 fn spinner(elapsed: Duration) -> &'static str {
@@ -2081,6 +2442,10 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from(vec![
             Span::styled("  ? / h", Style::default().fg(Color::Yellow)),
             Span::raw("      Toggle help"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+i", Style::default().fg(Color::Yellow)),
+            Span::raw("   Page info"),
         ]),
         Line::from(vec![
             Span::styled("  q / Esc", Style::default().fg(Color::Yellow)),
@@ -2303,10 +2668,24 @@ fn load_directory_page(path: &Path, _keyring: &PublicKeyring) -> anyhow::Result<
 // ── Live reload ───────────────────────────────────────────────────────
 
 /// Get the modification time of a file-backed page, if applicable.
+/// For directories, returns a combined hash of entry names + mtimes so added/
+/// removed/changed files are detected.
 fn file_mtime_of(location: &PageLocation) -> Option<SystemTime> {
     match location {
         PageLocation::File(path) if path.is_file() => {
             fs::metadata(path).ok()?.modified().ok()
+        }
+        PageLocation::File(path) if path.is_dir() => {
+            // For directories, use the dir's own mtime (changes on add/remove)
+            // plus the mtime of index.jrg if it exists
+            let dir_mtime = fs::metadata(path).ok()?.modified().ok()?;
+            let index_path = path.join("index.jrg");
+            if index_path.is_file() {
+                let index_mtime = fs::metadata(&index_path).ok()?.modified().ok()?;
+                Some(index_mtime.max(dir_mtime))
+            } else {
+                Some(dir_mtime)
+            }
         }
         _ => None,
     }
@@ -2329,7 +2708,7 @@ fn check_live_reload(
     if let Ok(reloaded) = load_location(&page.location) {
         *page = reloaded;
         state.record_current(page.document.title().unwrap_or("Untitled"));
-        state.status = String::from("Reloaded (file changed)");
+        state.status = String::from("⚡ Reloaded (file changed)");
     }
 }
 
@@ -2449,7 +2828,11 @@ mod tests {
             stream_rx: None,
         };
 
-        let rendered = render_lines(&page, 0)
+        let rendered = render_lines(&page, 0, &FindState {
+            query: String::new(),
+            matches: Vec::new(),
+            match_idx: 0,
+        }, Color::Reset)
             .into_iter()
             .map(|line| {
                 line.spans

@@ -1,0 +1,44 @@
+# Protocol Reference
+
+## JRG Wire Protocol
+
+JRG uses a simple TCP-based protocol.
+
+## Request Format
+
+```
+GET /path JRG/0.1
+
+```
+
+## Response Format
+
+```
+JRG/0.1 200 OK
+Content-Type: text/jrg
+
+# Page Content
+```
+
+## Tags
+
+- Tag-Redirect: target
+- Tag-Stream: true
+- Tag-Key: key-id ed25519:BASE64
+- Tag-ContentType: mime/type
+
+## URL Scheme
+
+```
+jrg://host:port/path
+jrg://https.domain.com/page
+jrg://http/domain.com/page
+```
+
+## Encryption
+
+XChaCha20-Poly1305 encrypted frames.
+
+~~~
+title: Protocol Reference
+tags: reference, protocol

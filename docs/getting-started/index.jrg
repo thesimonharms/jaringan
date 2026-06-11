@@ -1,0 +1,36 @@
+# Getting Started
+
+## Installation
+
+Jaringan is installed from source via Cargo:
+
+```
+cargo install --path crates/jaringan-browser
+```
+
+## Your First Page
+
+Create a file called hello.jrg:
+
+```
+# Hello World
+
+Welcome to Jaringan!
+
+=> https://example.com Visit Example
+```
+
+Open it with:
+
+```
+jaringan-browser open hello.jrg
+```
+
+## Next Steps
+
+=> ../guide/index.jrg Read the User Guide
+=> ../reference/index.jrg Browse the Reference
+
+~~~
+title: Getting Started
+tags: getting-started, tutorial

@@ -1,0 +1,24 @@
+# Search
+
+## Building an Index
+
+```
+jaringan-browser index ./my-site --output search.idx
+```
+
+## Searching
+
+```
+jaringan-browser search ./my-site "query terms"
+```
+
+## In-Browser Search
+
+```
+? q label="Search" placeholder="Type here..."
+! search label="Search" method="POST" target="/actions/search" auth="demo-search"
+```
+
+~~~
+title: Search
+tags: guide, search

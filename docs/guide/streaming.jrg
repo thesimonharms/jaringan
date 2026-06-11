@@ -1,0 +1,36 @@
+# Streaming Content
+
+## Dynamic Pages
+
+Jaringan supports streaming responses where content arrives incrementally.
+
+## How It Works
+
+1. Server responds with Tag-Stream: true
+2. Connection stays open
+3. Content blocks arrive delimited by "." on a line by itself
+4. Browser appends each block to the page
+
+## Example
+
+A live blog or dashboard can push updates:
+
+```
+# Live Feed
+
+Initial content here.
+
+.
+Update 1: new data arrived
+.
+Update 2: more events
+.
+```
+
+## Gateway Support
+
+The HTTP gateway forwards streaming as Server-Sent Events (SSE).
+
+~~~
+title: Streaming Content
+tags: guide, streaming

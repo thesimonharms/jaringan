@@ -1,0 +1,35 @@
+# Your First Jaringan Page
+
+## Basic Structure
+
+A Jaringan page is plain text with special syntax:
+
+```
+# Page Title
+
+Paragraph content goes here.
+
+=> link-target Link Label
+```
+
+## Viewing Your Page
+
+```
+jaringan-browser open my-page.jrg
+```
+
+Or serve a directory:
+
+```
+jaringan-browser serve . 127.0.0.1:7070
+```
+
+Then connect from another terminal:
+
+```
+jaringan-browser get jrg://127.0.0.1:7070/my-page.jrg
+```
+
+~~~
+title: Your First Page
+tags: tutorial, basics

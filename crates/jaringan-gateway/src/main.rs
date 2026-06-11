@@ -79,6 +79,7 @@ fn main() {
                     jrg_host,
                     enable_http_bridge,
                     timeout_secs: timeout,
+                    ..Default::default()
                 };
 
                 let gateway = HttpToJrgGateway::new(config);
@@ -102,6 +103,7 @@ fn main() {
                 timeout_secs: timeout,
                 max_response_size,
                 follow_redirects,
+                ..Default::default()
             });
 
             let listener = match std::net::TcpListener::bind(&jrg_listen) {

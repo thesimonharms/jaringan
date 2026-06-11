@@ -1,0 +1,21 @@
+# Hello World
+
+Welcome to Jaringan! This is a simple page demonstrating basic markup.
+
+=> ../index.jrg Back to Examples
+
+## Features Demonstrated
+
+- Headings
+- Paragraphs
+- Links
+- Lists
+
+## Quick Links
+
+=> https://github.com/thesimonharms/jaringan GitHub Repo
+=> ../../README.md Project README
+
+~~~
+title: Hello World
+tags: example, basic

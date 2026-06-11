@@ -25,14 +25,28 @@ use axum::{
     extract::{Query, State},
     http::{HeaderValue, Method, StatusCode as HttpStatus, header},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Response},
+    response::{
+        Html,
+        IntoResponse,
+        Response,
+        sse::{Event, Sse},
+    },
     routing::get,
 };
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{GatewayError, jrg_to_html};
 use jaringan_protocol::{
     JaringanUrl,
+    ResponseTag,
+    fetch_tcp_stream_with_timeout,
     fetch_tcp_with_timeout, post_tcp,
 };
 
@@ -47,8 +61,15 @@ pub struct HttpToJrgGatewayConfig {
     /// If true, also serve an HTTP bridge at `/http/*` that lets JRG clients
     /// fetch arbitrary HTTP URLs via this gateway (complementary to JrgToHttpResolver).
     pub enable_http_bridge: bool,
+    /// If true, streaming JRG responses (`Tag-Stream: true`) are forwarded as
+    /// Server-Sent Events (SSE) rather than being buffered into a single HTML page.
+    pub enable_streaming: bool,
     /// Request timeout in seconds.
     pub timeout_secs: u64,
+    /// Time-to-live for cached responses, in seconds. Default: 60.
+    pub cache_ttl_secs: u64,
+    /// Maximum number of entries in the response cache. Default: 128.
+    pub cache_max_entries: usize,
 }
 
 impl Default for HttpToJrgGatewayConfig {
@@ -57,14 +78,25 @@ impl Default for HttpToJrgGatewayConfig {
             listen_addr: "127.0.0.1:8080".to_string(),
             jrg_host: "127.0.0.1:7070".to_string(),
             enable_http_bridge: false,
+            enable_streaming: true,
             timeout_secs: 10,
+            cache_ttl_secs: 60,
+            cache_max_entries: 128,
         }
     }
+}
+
+/// A cached JRG response entry.
+#[derive(Clone)]
+struct CachedEntry {
+    html: String,
+    cached_at: Instant,
 }
 
 #[derive(Clone)]
 struct AppState {
     config: Arc<HttpToJrgGatewayConfig>,
+    cache: Arc<Mutex<HashMap<String, CachedEntry>>>,
 }
 
 /// The HTTP→JRG gateway server.
@@ -80,8 +112,11 @@ impl HttpToJrgGateway {
 
     /// Start the HTTP server and block forever.
     pub async fn serve(self) -> Result<(), GatewayError> {
+        let cache: Arc<Mutex<HashMap<String, CachedEntry>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let state = AppState {
             config: Arc::new(self.config),
+            cache,
         };
 
         let router = Router::new()
@@ -215,7 +250,7 @@ async fn catch_all_handler(
 
     // Detect inline jrg:// URLs as implicit proxy
     if path.starts_with("jrg://") {
-        return fetch_via_jrg_and_respond(path, &method, &query, &body, &state.config).await;
+        return fetch_via_jrg_and_respond(path, &method, &query, &body, &state.config, &state.cache).await;
     }
 
     // HTTP bridge: /http/*url
@@ -229,11 +264,11 @@ async fn catch_all_handler(
     // Explicit proxy: /proxy/jrg://... 
     if let Some(jrg_url) = path.strip_prefix("proxy/jrg://") {
         let jrg_url = format!("jrg://{jrg_url}");
-        return fetch_via_jrg_and_respond(&jrg_url, &method, &query, &body, &state.config).await;
+        return fetch_via_jrg_and_respond(&jrg_url, &method, &query, &body, &state.config, &state.cache).await;
     }
     if path.starts_with("proxy/") {
         let jrg_url = format!("jrg://{}", path.strip_prefix("proxy/").unwrap_or(""));
-        return fetch_via_jrg_and_respond(&jrg_url, &method, &query, &body, &state.config).await;
+        return fetch_via_jrg_and_respond(&jrg_url, &method, &query, &body, &state.config, &state.cache).await;
     }
 
     // Implicit: map path to configured JRG host
@@ -241,18 +276,83 @@ async fn catch_all_handler(
         Ok(url) => url,
         Err(e) => return (HttpStatus::BAD_REQUEST, format!("Invalid path: {e}")).into_response(),
     };
-    fetch_via_jrg_and_respond(&jrg_url, &method, &query, &body, &state.config).await
+    fetch_via_jrg_and_respond(&jrg_url, &method, &query, &body, &state.config, &state.cache).await
 }
 
-/// Fetch a JRG URL and return HTML response.
+/// Fetch a JRG URL and return either HTML or SSE streaming response.
 async fn fetch_via_jrg_and_respond(
     jrg_url: &str,
     http_method: &Method,
     query: &HashMap<String, String>,
     body: &str,
     config: &HttpToJrgGatewayConfig,
+    cache: &Arc<Mutex<HashMap<String, CachedEntry>>>,
 ) -> Response {
-    match fetch_via_jrg(jrg_url, http_method, query, body, config).await {
+    // Check cache first for GET requests
+    if *http_method == Method::GET {
+        let ttl = Duration::from_secs(config.cache_ttl_secs);
+        let guard = cache.lock().unwrap();
+        if let Some(entry) = guard.get(jrg_url) {
+            if entry.cached_at.elapsed() < ttl {
+                return Html(entry.html.clone()).into_response();
+            }
+        }
+    }
+
+    let url = match JaringanUrl::parse(jrg_url) {
+        Ok(u) => u,
+        Err(e) => {
+            return (HttpStatus::BAD_REQUEST, format!("Invalid JRG URL '{jrg_url}': {e}")).into_response();
+        }
+    };
+
+    let timeout = Duration::from_secs(config.timeout_secs);
+
+    // Determine the effective body (append query params for GET)
+    let request_body = if query.is_empty() {
+        body.to_string()
+    } else {
+        let qs: Vec<String> = query
+            .iter()
+            .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
+            .collect();
+        if body.is_empty() {
+            qs.join("&")
+        } else {
+            format!("{}&{}", body, qs.join("&"))
+        }
+    };
+
+    // Try streaming path: GET-like methods only, when streaming is enabled
+    if config.enable_streaming && matches!(*http_method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        match fetch_tcp_stream_with_timeout(&url, timeout) {
+            Ok(mut stream_conn) => {
+                if stream_conn.response.tags.contains(&ResponseTag::Stream) {
+                    return sse_from_stream(stream_conn, request_body);
+                }
+                // Streaming tag not present — drain the stream connection and render as HTML.
+                let mut full_body = stream_conn.response.body.clone();
+                while let Ok(Some(block)) = stream_conn.read_block() {
+                    full_body.push_str(&block);
+                }
+                let response = jaringan_protocol::Response {
+                    status: stream_conn.response.status,
+                    content_type: stream_conn.response.content_type,
+                    tags: stream_conn.response.tags,
+                    body: full_body,
+                };
+                let html = jrg_to_html(&response);
+                return Html(html).into_response();
+            }
+            Err(e) => {
+                // Fall through to non-streaming fetch as a fallback
+                eprintln!("Stream fetch failed, falling back to regular fetch: {e}");
+            }
+        }
+    }
+
+    // Non-streaming path (or streaming disabled/fell back) — with caching
+    match fetch_via_jrg_inner(&url, http_method, &request_body, timeout, jrg_url, config, cache) {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
             let status = match &e {
@@ -262,6 +362,107 @@ async fn fetch_via_jrg_and_respond(
             (status, format!("Gateway error: {e}")).into_response()
         }
     }
+}
+
+/// Build an SSE response body that streams blocks from a streaming JRG connection.
+fn sse_from_stream(
+    mut stream_conn: jaringan_protocol::StreamConnection,
+    _request_body: String,
+) -> Response {
+    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(16);
+
+    // Spawn a blocking task to read blocks from the TCP stream and forward them as SSE events
+    tokio::task::spawn_blocking(move || {
+        loop {
+            match stream_conn.read_block() {
+                Ok(Some(block)) => {
+                    let event = Event::default()
+                        .event("block")
+                        .data(block);
+                    if tx.blocking_send(Ok(event)).is_err() {
+                        // Client disconnected
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    // Stream ended — send [DONE] marker
+                    let done = Event::default().data("[DONE]");
+                    let _ = tx.blocking_send(Ok(done));
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("SSE stream read error: {e}");
+                    break;
+                }
+            }
+        }
+    });
+
+    let stream: ReceiverStream<Result<Event, Infallible>> = ReceiverStream::new(rx);
+    Sse::new(stream)
+        .into_response()
+}
+
+/// Internal: perform a JRG TCP fetch and return rendered HTML.
+/// Caches successful GET responses in an in-memory cache keyed by JRG URL.
+fn fetch_via_jrg_inner(
+    url: &JaringanUrl,
+    http_method: &Method,
+    request_body: &str,
+    timeout: Duration,
+    jrg_url: &str,
+    config: &HttpToJrgGatewayConfig,
+    cache: &Arc<Mutex<HashMap<String, CachedEntry>>>,
+) -> Result<String, GatewayError> {
+    // For GET requests, check the cache first
+    if *http_method == Method::GET {
+        let ttl = Duration::from_secs(config.cache_ttl_secs);
+        let guard = cache.lock().unwrap();
+        if let Some(entry) = guard.get(jrg_url) {
+            if entry.cached_at.elapsed() < ttl {
+                return Ok(entry.html.clone());
+            }
+        }
+    }
+
+    let response = match *http_method {
+        Method::GET | Method::HEAD | Method::OPTIONS => {
+            fetch_tcp_with_timeout(url, timeout).map_err(GatewayError::JrgProtocol)?
+        }
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE => {
+            post_tcp(url, request_body.to_string()).map_err(GatewayError::JrgProtocol)?
+        }
+        _ => {
+            return Err(GatewayError::Config(format!(
+                "unsupported HTTP method: {http_method}"
+            )));
+        }
+    };
+
+    let html = jrg_to_html(&response);
+
+    // Only cache successful (200 OK) GET responses
+    if *http_method == Method::GET
+        && response.status == jaringan_protocol::StatusCode::Ok
+    {
+        let mut guard = cache.lock().unwrap();
+
+        // Clean stale entries if at capacity
+        if guard.len() >= config.cache_max_entries {
+            let now = Instant::now();
+            guard.retain(|_, v| now.duration_since(v.cached_at) < Duration::from_secs(config.cache_ttl_secs));
+        }
+
+        guard.insert(
+            jrg_url.to_string(),
+            CachedEntry {
+                html: html.clone(),
+                cached_at: Instant::now(),
+            },
+        );
+    }
+
+    Ok(html)
 }
 
 /// HTTP bridge: fetch an HTTP(S) URL and return as JRG HTML.
@@ -299,52 +500,6 @@ async fn http_bridge_inner(
             (HttpStatus::BAD_GATEWAY, format!("HTTP fetch error: {e}")).into_response()
         }
     }
-}
-
-/// Internal: perform a JRG TCP fetch and return HTML.
-async fn fetch_via_jrg(
-    jrg_url: &str,
-    http_method: &Method,
-    query: &HashMap<String, String>,
-    body: &str,
-    config: &HttpToJrgGatewayConfig,
-) -> Result<String, GatewayError> {
-    let url = JaringanUrl::parse(jrg_url).map_err(|e| {
-        GatewayError::Config(format!("invalid JRG URL '{jrg_url}': {e}"))
-    })?;
-
-    let timeout = Duration::from_secs(config.timeout_secs);
-
-    // Determine the effective body (append query params for GET)
-    let request_body = if query.is_empty() {
-        body.to_string()
-    } else {
-        let qs: Vec<String> = query
-            .iter()
-            .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
-            .collect();
-        if body.is_empty() {
-            qs.join("&")
-        } else {
-            format!("{}&{}", body, qs.join("&"))
-        }
-    };
-
-    let response = match *http_method {
-        Method::GET | Method::HEAD | Method::OPTIONS => {
-            fetch_tcp_with_timeout(&url, timeout).map_err(GatewayError::JrgProtocol)?
-        }
-        Method::POST | Method::PUT | Method::PATCH | Method::DELETE => {
-            post_tcp(&url, request_body).map_err(GatewayError::JrgProtocol)?
-        }
-        _ => {
-            return Err(GatewayError::Config(format!(
-                "unsupported HTTP method: {http_method}"
-            )));
-        }
-    };
-
-    Ok(jrg_to_html(&response))
 }
 
 fn urlencode(s: &str) -> String {
@@ -386,5 +541,207 @@ mod tests {
         assert_eq!(urlencode("hello world"), "hello+world");
         assert_eq!(urlencode("a/b?c"), "a%2Fb%3Fc");
         assert_eq!(urlencode("simple"), "simple");
+    }
+
+    #[test]
+    fn test_config_default_streaming_enabled() {
+        let config = HttpToJrgGatewayConfig::default();
+        assert!(config.enable_streaming);
+    }
+
+    #[test]
+    fn test_config_streaming_can_be_disabled() {
+        let config = HttpToJrgGatewayConfig {
+            enable_streaming: false,
+            ..Default::default()
+        };
+        assert!(!config.enable_streaming);
+    }
+
+    #[test]
+    fn test_response_tag_stream_detection() {
+        let response = jaringan_protocol::Response {
+            status: jaringan_protocol::StatusCode::Ok,
+            content_type: jaringan_protocol::ContentType::PlainText,
+            tags: vec![ResponseTag::Stream],
+            body: String::new(),
+        };
+        assert!(response.tags.contains(&ResponseTag::Stream));
+    }
+
+    #[test]
+    fn test_response_tag_no_stream() {
+        let response = jaringan_protocol::Response {
+            status: jaringan_protocol::StatusCode::Ok,
+            content_type: jaringan_protocol::ContentType::PlainText,
+            tags: vec![],
+            body: String::new(),
+        };
+        assert!(!response.tags.contains(&ResponseTag::Stream));
+    }
+
+    #[test]
+    fn test_cache_defaults() {
+        let config = HttpToJrgGatewayConfig::default();
+        assert_eq!(config.cache_ttl_secs, 60);
+        assert_eq!(config.cache_max_entries, 128);
+    }
+
+    #[test]
+    fn test_cache_hit_returns_cached_content() {
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let config = HttpToJrgGatewayConfig::default();
+
+        let key = "jrg://test/page.jrg";
+        let expected_html = "<html>cached</html>".to_string();
+
+        // Insert a cached entry directly
+        {
+            let mut guard = cache.lock().unwrap();
+            guard.insert(
+                key.to_string(),
+                CachedEntry {
+                    html: expected_html.clone(),
+                    cached_at: Instant::now(),
+                },
+            );
+        }
+
+        // Verify fetch_via_jrg_inner returns the cached entry without fetching
+        let url = JaringanUrl::parse(key).unwrap();
+        let method = Method::GET;
+        let result = fetch_via_jrg_inner(
+            &url,
+            &method,
+            "",
+            Duration::from_secs(10),
+            key,
+            &config,
+            &cache,
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), expected_html);
+    }
+
+    #[test]
+    fn test_cache_miss_returns_error_from_tcp_fetch() {
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let config = HttpToJrgGatewayConfig::default();
+
+        // Use a URL that will fail TCP fetch (no server listening)
+        let key = "jrg://127.0.0.1:19999/nonexistent.jrg";
+        let url = JaringanUrl::parse(key).unwrap();
+        let method = Method::GET;
+
+        let result = fetch_via_jrg_inner(
+            &url,
+            &method,
+            "",
+            Duration::from_secs(1),
+            key,
+            &config,
+            &cache,
+        );
+
+        // Should fail with a connection error since no server is listening
+        assert!(result.is_err());
+        match &result {
+            Err(GatewayError::JrgProtocol(_)) => {} // expected
+            _ => panic!("Expected JrgProtocol error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_cache_ttl_expiry_causes_miss() {
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let config = HttpToJrgGatewayConfig {
+            cache_ttl_secs: 0, // 0 second TTL — always expired
+            ..Default::default()
+        };
+
+        let key = "jrg://test/page.jrg";
+
+        // Insert a cached entry
+        {
+            let mut guard = cache.lock().unwrap();
+            guard.insert(
+                key.to_string(),
+                CachedEntry {
+                    html: "<html>stale</html>".to_string(),
+                    cached_at: Instant::now() - Duration::from_secs(1),
+                },
+            );
+        }
+
+        // Even though the entry exists, TTL=0 means it should be treated as expired.
+        // After that, fetch_via_jrg_inner will try a real TCP fetch which will fail.
+        let url = JaringanUrl::parse(key).unwrap();
+        let method = Method::GET;
+
+        let result = fetch_via_jrg_inner(
+            &url,
+            &method,
+            "",
+            Duration::from_secs(1),
+            key,
+            &config,
+            &cache,
+        );
+
+        // Should fail with JrgProtocol (connection refused) because TTL expired
+        assert!(result.is_err());
+        match &result {
+            Err(GatewayError::JrgProtocol(_)) => {} // expected
+            _ => panic!("Expected JrgProtocol error (TTL expired -> TCP fetch), got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_cache_non_get_not_cached() {
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let config = HttpToJrgGatewayConfig::default();
+
+        // POST requests should not check cache
+        let key = "jrg://test/page.jrg";
+
+        // Insert a cached entry
+        {
+            let mut guard = cache.lock().unwrap();
+            guard.insert(
+                key.to_string(),
+                CachedEntry {
+                    html: "<html>stale</html>".to_string(),
+                    cached_at: Instant::now(),
+                },
+            );
+        }
+
+        // POST should not serve from cache — it should try TCP fetch
+        let url = JaringanUrl::parse(key).unwrap();
+        let method = Method::POST;
+
+        let result = fetch_via_jrg_inner(
+            &url,
+            &method,
+            "",
+            Duration::from_secs(1),
+            key,
+            &config,
+            &cache,
+        );
+
+        // POST does not check cache, so it falls through to TCP fetch
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cache_configurable_ttl() {
+        let config = HttpToJrgGatewayConfig {
+            cache_ttl_secs: 300,
+            cache_max_entries: 64,
+            ..Default::default()
+        };
+        assert_eq!(config.cache_ttl_secs, 300);
+        assert_eq!(config.cache_max_entries, 64);
     }
 }

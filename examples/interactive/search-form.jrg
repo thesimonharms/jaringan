@@ -1,0 +1,14 @@
+# Search Form
+
+This page demonstrates a search form with input and action button.
+
+## Search
+
+? q label="Query" placeholder="Type your search..."
+! search label="Search" method="POST" target="/actions/search" auth="demo-search"
+
+=> ../index.jrg Back to Examples
+
+~~~
+title: Search Form
+tags: example, interactive, search

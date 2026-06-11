@@ -1,0 +1,21 @@
+# Signed Page
+
+This page demonstrates digital signatures. When served with a key-advertising server, the signature is verified by the browser.
+
+## Content
+
+This page is signed with the server's ed25519 key, ensuring authenticity and integrity.
+
+## Verification
+
+The browser header shows the signature status:
+- Secure: signed by trusted key
+- Unknown signer: key not in keyring
+- Invalid: signature mismatch
+
+=> ../index.jrg Back
+
+~~~
+title: Signed Page
+tags: example, advanced, signatures
+signed-by: demo-server

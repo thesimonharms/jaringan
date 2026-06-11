@@ -170,6 +170,7 @@ pub enum Overlay {
     History,
     Bookmarks,
     Find,
+    PageInfo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -427,6 +428,40 @@ fn looks_like_web_url(target: &str) -> bool {
     target.starts_with("http://")
         || target.starts_with("https://")
         || target.starts_with("www.")
+}
+
+// ── Tab Persistence ────────────────────────────────────────────────────
+
+/// A serializable record of a saved tab for persistence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SavedTab {
+    pub url: String,
+    pub title: String,
+}
+
+pub fn tabs_path() -> PathBuf {
+    ensure_data_dir().join("tabs.json")
+}
+
+/// Save open tabs to disk for restoration on the next launch.
+pub fn save_tabs(entries: &[SavedTab]) {
+    if let Ok(json) = serde_json::to_string(entries) {
+        if let Err(e) = fs::write(tabs_path(), json) {
+            eprintln!("[jaringan] warning: failed to save tabs: {e}");
+        }
+    }
+}
+
+/// Load previously saved tabs from disk.
+pub fn load_tabs() -> Vec<SavedTab> {
+    let path = tabs_path();
+    if !path.exists() {
+        return Vec::new();
+    }
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

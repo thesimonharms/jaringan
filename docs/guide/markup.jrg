@@ -1,0 +1,78 @@
+# Markup Syntax Reference
+
+## Headings
+
+```
+# Level 1
+## Level 2
+```
+
+## Paragraphs
+
+Just write text. Blank lines separate paragraphs.
+
+## Links
+
+```
+=> jrg://host/path Label
+=> https://example.com Web Link
+=> relative/path.jrg Relative Link
+```
+
+## Buttons
+
+```
+! action-id label="Label" method="POST" target="/submit" confirm="Are you sure?"
+```
+
+## Inputs
+
+```
+? field-name label="Label" value="default"
+? search-q label="Query" placeholder="Type to search..."
+```
+
+## Images
+
+```
+@ ./image.png alt="Description"
+```
+
+## Lists
+
+```
+- Item one
+- Item two
+```
+
+## Quotes
+
+```
+> This is a blockquote.
+```
+
+## Tables
+
+```
+| Name | Value |
+| --- | --- |
+| Alpha | 100 |
+```
+
+## Preformatted Code
+
+```rust
+fn main() { }
+```
+
+## Rules
+
+Use `---` on its own line.
+
+## Metadata
+
+Add `~~~~~` at the end, then key: value pairs.
+
+~~~
+title: Markup Syntax
+tags: guide, markup

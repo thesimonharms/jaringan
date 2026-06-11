@@ -1,0 +1,33 @@
+# Forms and Actions
+
+## Input Fields
+
+```
+? name label="Your Name" placeholder="Enter your name"
+? email label="Email" value="user@example.com"
+```
+
+## Action Buttons
+
+```
+! submit label="Send" method="POST" target="/api/submit"
+```
+
+## Action Tokens
+
+```
+! search label="Search" method="POST" target="/actions/search" auth="demo-search"
+```
+
+## Search
+
+Built-in search indexes .jrg files:
+
+```
+? q label="Query" placeholder="Search pages..."
+! search label="Search" method="POST" target="/actions/search" auth="demo-search"
+```
+
+~~~
+title: Forms and Actions
+tags: guide, actions

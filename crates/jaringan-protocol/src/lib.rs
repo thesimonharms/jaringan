@@ -49,6 +49,10 @@ impl JaringanUrl {
         self.0.fragment()
     }
 
+    pub fn port(&self) -> Option<u16> {
+        self.0.port()
+    }
+
     pub fn port_or_default(&self) -> u16 {
         self.0.port().unwrap_or(7070)
     }
@@ -193,6 +197,12 @@ pub enum ResponseTag {
     Redirect { target: String },
     /// Response is a stream — the connection stays open for incremental blocks.
     Stream,
+    /// Server advertises its ed25519 public key for signature verification.
+    /// Format: `Tag-Key: <key-id> ed25519:<base64-public-key>`
+    Key { key_id: String, key_base64: String },
+    /// Content-Type of the original HTTP response.
+    /// Format: `Tag-ContentType: <mime-type>`
+    ContentType { value: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -468,16 +478,29 @@ pub trait PageResolver {
     fn fetch(&self, request: &Request) -> Result<Response, ResolveError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A resolver that serves files from a local directory root.
 pub struct LocalFileResolver {
     root: PathBuf,
+    /// Optional key identity to include as `Tag-Key` in every response.
+    pub advertise_key_id: Option<(String, String)>,
 }
 
 impl LocalFileResolver {
+    /// Create a new resolver rooted at the given directory.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            advertise_key_id: None,
+        }
     }
 
+    /// Create a new resolver that advertises a key in every response.
+    pub fn new_with_key(root: PathBuf, key_id: String, key_base64: String) -> Self {
+        Self {
+            root,
+            advertise_key_id: Some((key_id, key_base64)),
+        }
+    }
     fn resolve_path(&self, url: &JaringanUrl) -> Option<PathBuf> {
         let path = url.path();
         let relative = if path == "/" {
@@ -574,6 +597,30 @@ impl PageResolver for LocalFileResolver {
             return self.handle_demo_search_action(request);
         }
 
+        // Handle .well-known/key — return the advertised key as a page
+        if request.url.path() == "/.well-known/key" {
+            if let Some((key_id, key_base64)) = &self.advertise_key_id {
+                let body = format!(
+                    "# Server Key\n\n\
+                     This server is signed by key:\n\n\
+                     ```\n{} ed25519:{}\n```\n\n\
+                     To trust this key, add it to your keyring:\n\n\
+                     ```\n{} ed25519:{}\n```\n\
+                     \n~~~\ntitle: Server Key\n",
+                    key_id, key_base64, key_id, key_base64,
+                );
+                return Ok(Response::page(StatusCode::Ok, body).with_tag(ResponseTag::Key {
+                    key_id: key_id.clone(),
+                    key_base64: key_base64.clone(),
+                }));
+            } else {
+                return Ok(Response::text(
+                    StatusCode::NotFound,
+                    "This server does not advertise a public key. Start with --advertise-key KEY_ID".to_string(),
+                ));
+            }
+        }
+
         let Some(path) = self.resolve_path(&request.url) else {
             return Ok(Response::text(
                 StatusCode::NotFound,
@@ -581,7 +628,7 @@ impl PageResolver for LocalFileResolver {
             ));
         };
 
-        match fs::read_to_string(&path) {
+        let mut response = match fs::read_to_string(&path) {
             Ok(body) => Ok(Response::page(StatusCode::Ok, body)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Response::text(
                 StatusCode::NotFound,
@@ -591,7 +638,17 @@ impl PageResolver for LocalFileResolver {
                 path,
                 source: error,
             }),
+        }?;
+
+        // Inject Tag-Key on every response if the server advertises one
+        if let Some((key_id, key_base64)) = &self.advertise_key_id {
+            response.tags.push(ResponseTag::Key {
+                key_id: key_id.clone(),
+                key_base64: key_base64.clone(),
+            });
         }
+
+        Ok(response)
     }
 }
 
@@ -800,6 +857,20 @@ fn read_response_header(reader: &mut BufReader<TcpStream>) -> Result<Response, W
             });
         } else if line.trim() == "Tag-Stream: true" {
             tags.push(ResponseTag::Stream);
+        } else if let Some(value) = line.strip_prefix("Tag-Key:") {
+            let value = value.trim();
+            if let Some((key_id, key_data)) = value.split_once(' ') {
+                if let Some(key_base64) = key_data.strip_prefix("ed25519:") {
+                    tags.push(ResponseTag::Key {
+                        key_id: key_id.to_owned(),
+                        key_base64: key_base64.to_owned(),
+                    });
+                }
+            }
+        } else if let Some(value) = line.strip_prefix("Tag-ContentType:") {
+            tags.push(ResponseTag::ContentType {
+                value: value.trim().to_owned(),
+            });
         }
     }
 
@@ -988,6 +1059,13 @@ pub fn write_response(writer: &mut impl Write, response: &Response) -> io::Resul
         match tag {
             ResponseTag::Redirect { target } => writeln!(writer, "Tag-Redirect: {target}")?,
             ResponseTag::Stream => writeln!(writer, "Tag-Stream: true")?,
+            ResponseTag::Key {
+                key_id,
+                key_base64,
+            } => writeln!(writer, "Tag-Key: {key_id} ed25519:{key_base64}")?,
+            ResponseTag::ContentType { value } => {
+                writeln!(writer, "Tag-ContentType: {value}")?
+            }
         }
     }
     writeln!(writer)?;
@@ -1144,6 +1222,20 @@ pub fn read_response(reader: &mut impl Read) -> Result<Response, WireError> {
             });
         } else if line.trim() == "Tag-Stream: true" {
             tags.push(ResponseTag::Stream);
+        } else if let Some(value) = line.strip_prefix("Tag-Key:") {
+            let value = value.trim();
+            if let Some((key_id, key_data)) = value.split_once(' ') {
+                if let Some(key_base64) = key_data.strip_prefix("ed25519:") {
+                    tags.push(ResponseTag::Key {
+                        key_id: key_id.to_owned(),
+                        key_base64: key_base64.to_owned(),
+                    });
+                }
+            }
+        } else if let Some(value) = line.strip_prefix("Tag-ContentType:") {
+            tags.push(ResponseTag::ContentType {
+                value: value.trim().to_owned(),
+            });
         }
     }
 
