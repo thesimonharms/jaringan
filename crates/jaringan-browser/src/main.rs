@@ -693,7 +693,7 @@ fn run_app(
     let plugin_input = ScriptInput {
         title: page.document.title().map(|s| s.to_owned()),
         inputs: Vec::new(),
-        metadata: None,
+        page_metadata: None,
         blocks: Vec::new(),
         tui: None,
     };
@@ -1130,7 +1130,7 @@ fn handle_key_event(
     let plugin_key_input = ScriptInput {
         title: None,
         inputs: Vec::new(),
-        metadata: None,
+        page_metadata: None,
         blocks: Vec::new(),
         tui: Some(jaringan_script::TuiContext {
             current_url: Some(page.location.display_url()),

@@ -50,6 +50,9 @@ use jaringan_protocol::{
     fetch_tcp_with_timeout, post_tcp,
 };
 
+/// Maximum request body size (10 MB). Prevents OOM from large POST bodies.
+const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+
 /// Configuration for the HTTP→JRG gateway.
 #[derive(Debug, Clone)]
 pub struct HttpToJrgGatewayConfig {
@@ -237,6 +240,10 @@ async fn catch_all_handler(
     query: Query<HashMap<String, String>>,
     body: String,
 ) -> Response {
+    // Enforce max body size to prevent OOM
+    if body.len() > MAX_BODY_SIZE {
+        return (HttpStatus::PAYLOAD_TOO_LARGE, format!("Request body exceeds maximum allowed size ({MAX_BODY_SIZE} bytes)")).into_response();
+    }
     // Get the path from the URI
     let path = uri.path().trim_start_matches('/');
 
@@ -291,7 +298,7 @@ async fn fetch_via_jrg_and_respond(
     // Check cache first for GET requests
     if *http_method == Method::GET {
         let ttl = Duration::from_secs(config.cache_ttl_secs);
-        let guard = cache.lock().unwrap();
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = guard.get(jrg_url) {
             if entry.cached_at.elapsed() < ttl {
                 return Html(entry.html.clone()).into_response();
@@ -417,7 +424,7 @@ fn fetch_via_jrg_inner(
     // For GET requests, check the cache first
     if *http_method == Method::GET {
         let ttl = Duration::from_secs(config.cache_ttl_secs);
-        let guard = cache.lock().unwrap();
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = guard.get(jrg_url) {
             if entry.cached_at.elapsed() < ttl {
                 return Ok(entry.html.clone());
@@ -445,12 +452,18 @@ fn fetch_via_jrg_inner(
     if *http_method == Method::GET
         && response.status == jaringan_protocol::StatusCode::Ok
     {
-        let mut guard = cache.lock().unwrap();
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Clean stale entries if at capacity
+        // Enforce capacity: evict stale entries first, then oldest if still over limit
         if guard.len() >= config.cache_max_entries {
             let now = Instant::now();
             guard.retain(|_, v| now.duration_since(v.cached_at) < Duration::from_secs(config.cache_ttl_secs));
+            // If all entries are still fresh, evict the oldest one
+            if guard.len() >= config.cache_max_entries {
+                if let Some(oldest_key) = guard.iter().min_by_key(|(_, v)| v.cached_at).map(|(k, _)| k.clone()) {
+                    guard.remove(&oldest_key);
+                }
+            }
         }
 
         guard.insert(

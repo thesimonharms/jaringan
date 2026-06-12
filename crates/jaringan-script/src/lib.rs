@@ -48,12 +48,34 @@ pub struct TuiContext {
     pub mode: String,
 }
 
-/// Metadata attached to the script invocation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScriptMetadata {
-    pub url: Option<String>,
-    pub domain: Option<String>,
-    pub title: Option<String>,
+// ── Metadata parsing ─────────────────────────────────────────────────
+
+/// Parse simple key:value page metadata lines into a JSON object.
+/// Handles the format: `key: value` (one per line), trims whitespace.
+fn parse_page_metadata(raw: Option<&str>) -> Option<serde_json::Value> {
+    let raw = raw?;
+    if raw.is_empty() {
+        return None;
+    }
+    let mut map = serde_json::Map::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            let k = key.trim().to_owned();
+            let v = value.trim().to_owned();
+            if !k.is_empty() {
+                map.insert(k, serde_json::Value::String(v));
+            }
+        }
+    }
+    if map.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(map))
+    }
 }
 
 /// Full input payload sent into a WASM script.
@@ -61,7 +83,9 @@ pub struct ScriptMetadata {
 pub struct ScriptInput {
     pub title: Option<String>,
     pub inputs: Vec<ScriptInputField>,
-    pub metadata: Option<ScriptMetadata>,
+    /// Page metadata from YAML frontmatter (e.g. `enrich_url`, `author`).
+    /// Parsed into a JSON object keyed by name.
+    pub page_metadata: Option<serde_json::Value>,
     pub blocks: Vec<ScriptBlock>,
     pub tui: Option<TuiContext>,
 }
@@ -381,7 +405,7 @@ pub fn execute_document_scripts(
                     })
                 } else { None }
             }).collect(),
-            metadata: None,
+            page_metadata: parse_page_metadata(doc.metadata.as_deref()),
             blocks: script_blocks,
             tui: None,
         };
@@ -454,7 +478,7 @@ mod tests {
         let input = ScriptInput {
             title: Some("Test".into()),
             inputs: vec![],
-            metadata: None,
+            page_metadata: None,
             blocks: vec![ScriptBlock::Heading {
                 level: 1,
                 text: "Hello".into(),
@@ -479,7 +503,7 @@ mod tests {
                 value: Some("Simon".into()),
                 placeholder: None,
             }],
-            metadata: None,
+            page_metadata: None,
             blocks: vec![
                 ScriptBlock::Heading { level: 1, text: "Scripted Page".into() },
                 ScriptBlock::Paragraph { text: "Hello from the other side".into() },
@@ -548,7 +572,7 @@ mod tests {
         let input = ScriptInput {
             title: Some("Bridge Test".into()),
             inputs: vec![],
-            metadata: None,
+            page_metadata: None,
             blocks: vec![],
             tui: None,
         };

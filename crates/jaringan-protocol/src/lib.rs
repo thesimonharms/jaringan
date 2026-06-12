@@ -810,9 +810,25 @@ pub fn fetch_tcp_with_timeout(url: &JaringanUrl, timeout: Duration) -> Result<Re
     send_tcp_with_timeout(Request::new(url.clone()), timeout)
 }
 
+/// Resolve a host:port pair to a socket address with a timeout.
+/// Prevents indefinite blocking on slow/malicious DNS servers.
+fn resolve_addr(host: &str, port: u16, timeout: Duration) -> Result<std::net::SocketAddr, WireError> {
+    let host = host.to_owned();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send((host.as_str(), port).to_socket_addrs());
+    });
+    let mut addrs = rx
+        .recv_timeout(timeout)
+        .map_err(|_| WireError::BadAddress)?
+        .map_err(|_| WireError::BadAddress)?;
+    addrs.next().ok_or(WireError::BadAddress)
+}
+
+// ── Base TCP fetch ────────────────────────────────────────────────────
+
 fn send_tcp_with_timeout(request: Request, timeout: Duration) -> Result<Response, WireError> {
-    let mut addrs = (request.url.host(), request.url.port_or_default()).to_socket_addrs()?;
-    let addr = addrs.next().ok_or(WireError::BadAddress)?;
+    let addr = resolve_addr(request.url.host(), request.url.port_or_default(), timeout)?;
     let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
@@ -933,8 +949,7 @@ pub fn fetch_tcp_stream_with_timeout(
     timeout: Duration,
 ) -> Result<StreamConnection, WireError> {
     let request = Request::new(url.clone());
-    let mut addrs = (request.url.host(), request.url.port_or_default()).to_socket_addrs()?;
-    let addr = addrs.next().ok_or(WireError::BadAddress)?;
+    let addr = resolve_addr(request.url.host(), request.url.port_or_default(), timeout)?;
     let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
     // Long read timeout for streaming; will be signalled by connection close
     stream.set_read_timeout(Some(Duration::from_secs(300)))?;
@@ -950,8 +965,7 @@ fn send_tcp_encrypted_with_timeout(
     config: &EncryptedTcpConfig,
     timeout: Duration,
 ) -> Result<Response, WireError> {
-    let mut addrs = (request.url.host(), request.url.port_or_default()).to_socket_addrs()?;
-    let addr = addrs.next().ok_or(WireError::BadAddress)?;
+    let addr = resolve_addr(request.url.host(), request.url.port_or_default(), timeout)?;
     let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;

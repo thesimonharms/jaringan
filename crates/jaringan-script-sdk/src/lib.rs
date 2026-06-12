@@ -8,6 +8,7 @@ pub use serde_json;
 
 #[cfg(target_arch = "wasm32")]
 use alloc::alloc::{GlobalAlloc, Layout};
+#[cfg(target_arch = "wasm32")]
 use core::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(target_arch = "wasm32")]
 use alloc::borrow::ToOwned;

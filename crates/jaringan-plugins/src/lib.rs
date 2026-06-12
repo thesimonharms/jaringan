@@ -238,7 +238,7 @@ mod tests {
         let input = ScriptInput {
             title: Some("Test".into()),
             inputs: vec![],
-            metadata: None,
+            page_metadata: None,
             blocks: vec![],
             tui: None,
         };
