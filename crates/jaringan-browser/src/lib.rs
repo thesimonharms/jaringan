@@ -47,11 +47,10 @@ pub fn history_path() -> PathBuf {
 }
 
 pub fn save_history(entries: &[HistoryEntry]) {
-    if let Ok(json) = serde_json::to_string(entries) {
-        if let Err(e) = fs::write(history_path(), json) {
+    if let Ok(json) = serde_json::to_string(entries)
+        && let Err(e) = fs::write(history_path(), json) {
             eprintln!("[jaringan] warning: failed to save history: {e}");
         }
-    }
 }
 
 pub fn load_history() -> Vec<HistoryEntry> {
@@ -99,11 +98,10 @@ pub fn bookmarks_path() -> PathBuf {
 }
 
 pub fn save_bookmarks(entries: &[Bookmark]) {
-    if let Ok(json) = serde_json::to_string(entries) {
-        if let Err(e) = fs::write(bookmarks_path(), json) {
+    if let Ok(json) = serde_json::to_string(entries)
+        && let Err(e) = fs::write(bookmarks_path(), json) {
             eprintln!("[jaringan] warning: failed to save bookmarks: {e}");
         }
-    }
 }
 
 pub fn load_bookmarks() -> Vec<Bookmark> {
@@ -446,11 +444,10 @@ pub fn tabs_path() -> PathBuf {
 
 /// Save open tabs to disk for restoration on the next launch.
 pub fn save_tabs(entries: &[SavedTab]) {
-    if let Ok(json) = serde_json::to_string(entries) {
-        if let Err(e) = fs::write(tabs_path(), json) {
+    if let Ok(json) = serde_json::to_string(entries)
+        && let Err(e) = fs::write(tabs_path(), json) {
             eprintln!("[jaringan] warning: failed to save tabs: {e}");
         }
-    }
 }
 
 /// Load previously saved tabs from disk.

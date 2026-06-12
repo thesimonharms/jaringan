@@ -75,9 +75,8 @@ impl JrgFormatter {
                 Block::Heading { level, text } => {
                     let _ = writeln!(
                         out,
-                        "{}{} {}",
+                        "{} {}",
                         "#".repeat(*level as usize),
-                        "",
                         text
                     );
                 }
