@@ -601,8 +601,41 @@ fn run_app(
     // Create a bridge that lets WASM scripts call host functions
     let bridge: Option<BridgeState> = Some(BridgeState {
         fetch_fn: Some(std::sync::Arc::new(|url: &str| {
-            // TODO: implement real fetch via JRG resolver/gateway
-            Err(format!("bridge fetch not yet implemented for: {url}"))
+            (|| -> Result<String, String> {
+                let result = if url.starts_with("http://") || url.starts_with("https://") {
+                    // Web URL: use JrgToHttpResolver gateway
+                    let resolver = jaringan_gateway::JrgToHttpResolver::new(
+                        jaringan_gateway::JrgToHttpResolverConfig::default(),
+                    );
+                    let jrg_url = web_to_jrg_url(url);
+                    let parsed = JaringanUrl::parse(&jrg_url)
+                        .map_err(|e| format!("bridge: bad JRG URL '{jrg_url}': {e}"))?;
+                    let resp = resolver
+                        .fetch(&Request::new(parsed))
+                        .map_err(|e| format!("bridge: gateway fetch failed: {e}"))?;
+                    (resp.status.as_u16(), resp.content_type.as_str().to_string(), resp.body)
+                } else if url.starts_with("jrg://") {
+                    // JRG URL: use TCP protocol directly
+                    let parsed = JaringanUrl::parse(url)
+                        .map_err(|e| format!("bridge: bad JRG URL '{url}': {e}"))?;
+                    let resp = fetch_tcp(&parsed)
+                        .map_err(|e| format!("bridge: JRG fetch failed: {e}"))?;
+                    (resp.status.as_u16(), resp.content_type.as_str().to_string(), resp.body)
+                } else {
+                    // Local file path
+                    match std::fs::read_to_string(url) {
+                        Ok(body) => (200, "text/plain; charset=utf-8".into(), body),
+                        Err(e) => return Err(format!("bridge: failed to read '{url}': {e}")),
+                    }
+                };
+                let (status, content_type, body) = result;
+                Ok(serde_json::json!({
+                    "status": status,
+                    "content_type": content_type,
+                    "body": body,
+                    "error": null
+                }).to_string())
+            })()
         })),
         navigate_fn: Some(std::sync::Arc::new(|url: &str| {
             eprintln!("[jaringan] bridge navigate: {url}");
