@@ -21,13 +21,20 @@ impl BridgeState {
 }
 
 /// Read a NUL-free string from WASM linear memory at the given pointer and
-/// length.
+/// length. Returns an empty string if the pointer/length are out of bounds
+/// (bounds-checked to prevent host panics from malicious WASM modules).
 ///
 /// `store` must implement `AsContext` (e.g. `&Store<T>` or `StoreContext<'_, T>`).
 pub fn read_string(mem: &Memory, store: &impl AsContext, ptr: i32, len: i32) -> String {
     let data = mem.data(store);
+    if ptr < 0 || len < 0 {
+        return String::new();
+    }
     let start = ptr as usize;
-    let end = start + len as usize;
+    let end = start.saturating_add(len as usize);
+    if start >= data.len() || end > data.len() {
+        return String::new();
+    }
     String::from_utf8_lossy(&data[start..end]).into_owned()
 }
 
@@ -47,8 +54,9 @@ pub fn write_json<T: AsContextMut>(mem: &Memory, store: &mut T, json: &str) -> i
     let current_size = mem.size(&*store) as usize * 65_536;
     if offset + needed > current_size {
         let pages_needed = (offset + needed - current_size + 65_535) / 65_536;
-        mem.grow(&mut *store, pages_needed as u64)
-            .expect("failed to grow wasm memory for bridge write");
+        if mem.grow(&mut *store, pages_needed as u64).is_err() {
+            return 0; // out of memory — return null pointer
+        }
     }
 
     let data = mem.data_mut(&mut *store);
@@ -61,9 +69,10 @@ pub fn write_json<T: AsContextMut>(mem: &Memory, store: &mut T, json: &str) -> i
 /// Write an error JSON (`{"error":"<msg>"}`) into WASM memory.  Same layout as
 /// `write_json`.  Returns the offset (65536).
 pub fn write_error<T: AsContextMut>(mem: &Memory, store: &mut T, msg: &str) -> i32 {
-    // Very basic JSON escaping – enough for error messages that contain quotes
-    // or backslashes.
-    let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
-    let json = format!("{{\"error\":\"{}\"}}", escaped);
-    write_json(mem, store, &json)
+    // Use serde_json for proper escaping (handles control chars, quotes, backslashes)
+    let json = serde_json::json!({ "error": msg });
+    let json_str = serde_json::to_string(&json).unwrap_or_else(|_| {
+        r#"{"error":"internal serialization error"}"#.to_string()
+    });
+    write_json(mem, store, &json_str)
 }

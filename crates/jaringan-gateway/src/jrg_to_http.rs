@@ -409,11 +409,18 @@ impl PageResolver for JrgToHttpResolver {
             .text()
             .unwrap_or_else(|_| "Error reading response body".to_string());
 
-        // Truncate if too large
+        // Truncate if too large (char-boundary safe to avoid UTF-8 panic)
         let body = if body.len() > self.config.max_response_size {
+            let truncate_at = self.config.max_response_size;
+            // Find the nearest char boundary at or before truncate_at
+            let safe_boundary = if body.is_char_boundary(truncate_at) {
+                truncate_at
+            } else {
+                body[..truncate_at].char_indices().last().map(|(i, _)| i).unwrap_or(0)
+            };
             format!(
                 "{}\n\n[Response truncated at {} bytes]",
-                &body[..self.config.max_response_size],
+                &body[..safe_boundary],
                 self.config.max_response_size,
             )
         } else {

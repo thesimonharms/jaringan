@@ -14,6 +14,10 @@ use chacha20poly1305::{
 use thiserror::Error;
 use url::Url;
 
+/// Maximum accepted request body size (10 MB). Prevents OOM from malicious
+/// or malformed Content-Length headers.
+pub const MAX_REQUEST_BODY: usize = 10 * 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JaringanUrl(Url);
 
@@ -1035,6 +1039,10 @@ fn read_wire_request_from_reader(reader: &mut impl BufRead) -> Result<Request, W
         return Err(WireError::BadRequest);
     };
 
+    if content_length > MAX_REQUEST_BODY {
+        return Err(WireError::PayloadTooLarge);
+    }
+
     let mut body = vec![0; content_length];
     reader.read_exact(&mut body)?;
     let body = String::from_utf8(body).map_err(|_| WireError::BadRequest)?;
@@ -1178,6 +1186,9 @@ fn read_encrypted_frame(
     }
     let nonce_base64 = nonce_base64.ok_or(WireError::BadEncryptedFrame)?;
     let content_length = content_length.ok_or(WireError::BadEncryptedFrame)?;
+    if content_length > MAX_REQUEST_BODY {
+        return Err(WireError::PayloadTooLarge);
+    }
     let mut ciphertext = vec![0; content_length];
     reader.read_exact(&mut ciphertext)?;
     let ciphertext_base64 =
@@ -1267,6 +1278,8 @@ pub enum WireError {
     Encryption(#[from] EncryptionError),
     #[error("could not resolve Jaringan host")]
     BadAddress,
+    #[error("request body exceeds maximum allowed size ({MAX_REQUEST_BODY} bytes)")]
+    PayloadTooLarge,
 }
 
 #[cfg(test)]

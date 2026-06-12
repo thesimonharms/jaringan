@@ -627,6 +627,10 @@ fn table_text(table: &Table) -> String {
 pub enum ParseError {
     #[error("unterminated preformatted block starting at line {line}")]
     UnterminatedPreformatted { line: usize },
+    #[error("unterminated script block starting at line {line}")]
+    UnterminatedScript { line: usize },
+    #[error("invalid WASM in script block starting at line {line}: {detail}")]
+    InvalidScriptWasm { line: usize, detail: String },
 }
 
 pub fn parse_document(input: &str) -> Result<Document, ParseError> {
@@ -708,7 +712,7 @@ impl<'a> Parser<'a> {
                 self.blocks.push(Block::Image(image));
                 self.cursor += 1;
             } else if trimmed.starts_with("~>") {
-                self.parse_script();
+                self.parse_script()?;
             } else {
                 self.parse_paragraph();
             }
@@ -823,32 +827,50 @@ impl<'a> Parser<'a> {
         self.blocks.push(Block::Paragraph(lines.join(" ")));
     }
 
-    fn parse_script(&mut self) {
+    fn parse_script(&mut self) -> Result<(), ParseError> {
+        let start_line = self.cursor + 1;
         let line = self.peek().unwrap_or("");
         let remainder = line.trim().strip_prefix("~>").unwrap_or("").trim();
         let label = if remainder.is_empty() { None } else { Some(remainder.to_owned()) };
         self.cursor += 1;
 
         let mut body = Vec::new();
+        let mut found_end = false;
         while let Some(line) = self.peek() {
             if line.trim() == "~<" {
                 self.cursor += 1;
+                found_end = true;
                 break;
             }
             body.push(line);
             self.cursor += 1;
         }
 
+        if !found_end {
+            return Err(ParseError::UnterminatedScript { line: start_line });
+        }
+
         let joined = body.join("\n");
         let wasm = if joined.trim().starts_with('(') {
-            wat::parse_str(joined).unwrap_or_default()
+            wat::parse_str(joined).map_err(|e| {
+                ParseError::InvalidScriptWasm {
+                    line: start_line,
+                    detail: e.to_string(),
+                }
+            })?
         } else {
             base64::engine::general_purpose::STANDARD
                 .decode(joined.trim())
-                .unwrap_or_default()
+                .map_err(|e| {
+                    ParseError::InvalidScriptWasm {
+                        line: start_line,
+                        detail: e.to_string(),
+                    }
+                })?
         };
 
         self.blocks.push(Block::Script { wasm, label });
+        Ok(())
     }
 }
 
@@ -866,7 +888,18 @@ fn parse_heading(line: &str) -> Option<Block> {
 }
 
 fn is_rule(line: &str) -> bool {
-    matches!(line, "---" | "***" | "___")
+    let trimmed = line.trim();
+    if trimmed.len() < 3 {
+        return false;
+    }
+    let first = trimmed.as_bytes().first();
+    let ch = match first {
+        Some(b'-') => b'-',
+        Some(b'*') => b'*',
+        Some(b'_') => b'_',
+        _ => return false,
+    };
+    trimmed.bytes().all(|b| b == ch)
 }
 
 fn is_list_item(line: &str) -> bool {

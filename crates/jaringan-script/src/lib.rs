@@ -337,6 +337,10 @@ pub fn script_blocks_to_blocks(script_blocks: &[ScriptBlock]) -> Vec<jaringan_co
 /// Run all WASM script blocks in a document against the document itself,
 /// returning the transformed blocks (with Script blocks consumed).
 ///
+/// Scripts run **sequentially**: each script sees the output of the previous
+/// script as its input. The index of each Script block is re-discovered on
+/// every iteration so that replacing `current_blocks` does not go stale.
+///
 /// When `bridge` is `Some`, scripts can invoke host functions (fetch, navigate,
 /// log) through the provided [`BridgeState`]; otherwise those imports fall back
 /// to no-ops.
@@ -346,19 +350,22 @@ pub fn execute_document_scripts(
     bridge: Option<&BridgeState>,
 ) -> Result<Vec<jaringan_core::Block>, WasmError> {
     use jaringan_core::Block;
-    // Gather indices of Script blocks
-    let script_indices: Vec<usize> = doc.blocks.iter().enumerate()
-        .filter_map(|(i, b)| matches!(b, jaringan_core::Block::Script { .. }).then_some(i))
-        .collect();
-
-    if script_indices.is_empty() {
-        return Ok(doc.blocks.clone());
-    }
 
     let mut current_blocks = doc.blocks.clone();
 
-    for idx in &script_indices {
-        let Block::Script { wasm, label: _ } = &current_blocks[*idx] else { continue };
+    // Loop: find the FIRST Script block in the current blocks each time.
+    // This avoids stale indices when a previous script replaces all blocks.
+    loop {
+        let script_idx = match current_blocks.iter().position(|b| {
+            matches!(b, jaringan_core::Block::Script { .. })
+        }) {
+            Some(idx) => idx,
+            None => break, // no more scripts — done
+        };
+
+        let Block::Script { wasm, .. } = &current_blocks[script_idx] else {
+            unreachable!("position() returned a Script index");
+        };
 
         let script_blocks = blocks_to_script_blocks(&current_blocks);
 
@@ -384,12 +391,12 @@ pub fn execute_document_scripts(
         } else {
             runtime.execute(wasm, &input)?
         };
+
         current_blocks = script_blocks_to_blocks(&output.blocks);
     }
 
     Ok(current_blocks)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

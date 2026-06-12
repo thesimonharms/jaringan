@@ -14,6 +14,13 @@ static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(|| {
 
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(|| ThemeSet::load_defaults());
 
+/// Safely look up a theme, falling back to the first available theme if missing.
+fn get_theme(name: &str) -> syntect::highlighting::Theme {
+    THEME_SET.themes.get(name).cloned().unwrap_or_else(|| {
+        THEME_SET.themes.values().next().cloned().unwrap_or_default()
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderOptions {
     pub show_link_targets: bool,
@@ -221,8 +228,9 @@ fn highlight_ansi(code: &str, language: Option<&str>) -> String {
     let syntax = SYNTAX_SET
         .find_syntax_by_token(lang)
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+    let theme = get_theme("base16-ocean.dark");
     let mut highlighter =
-        HighlightLines::new(syntax, &THEME_SET.themes["base16-ocean.dark"]);
+        HighlightLines::new(syntax, &theme);
     let mut output = String::new();
     for line in LinesWithEndings::from(code) {
         if let Ok(ranges) = highlighter.highlight_line(line, &SYNTAX_SET) {
@@ -240,8 +248,9 @@ fn highlight_ratatui(code: &str, language: Option<&str>) -> Vec<Line<'static>> {
     let syntax = SYNTAX_SET
         .find_syntax_by_token(lang)
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+    let theme = get_theme("base16-ocean.dark");
     let mut highlighter =
-        HighlightLines::new(syntax, &THEME_SET.themes["base16-ocean.dark"]);
+        HighlightLines::new(syntax, &theme);
     let mut lines = Vec::new();
     for line in LinesWithEndings::from(code) {
         if let Ok(ranges) = highlighter.highlight_line(line, &SYNTAX_SET) {

@@ -599,13 +599,17 @@ fn run_app(
     let script_runtime = WasmRuntime::new().ok();
 
     // Create a bridge that lets WASM scripts call host functions
+    let bridge_timeout = cfg.gateway.timeout_secs;
     let bridge: Option<BridgeState> = Some(BridgeState {
-        fetch_fn: Some(std::sync::Arc::new(|url: &str| {
+        fetch_fn: Some(std::sync::Arc::new(move |url: &str| {
             (|| -> Result<String, String> {
                 let result = if url.starts_with("http://") || url.starts_with("https://") {
-                    // Web URL: use JrgToHttpResolver gateway
+                    // Web URL: use JrgToHttpResolver gateway (with user's timeout)
                     let resolver = jaringan_gateway::JrgToHttpResolver::new(
-                        jaringan_gateway::JrgToHttpResolverConfig::default(),
+                        jaringan_gateway::JrgToHttpResolverConfig {
+                            timeout_secs: bridge_timeout,
+                            ..Default::default()
+                        },
                     );
                     let jrg_url = web_to_jrg_url(url);
                     let parsed = JaringanUrl::parse(&jrg_url)
@@ -985,10 +989,8 @@ fn handle_key_event(
         KeyCode::Tab => toggle_mode(state),
         KeyCode::Char('s') => switch_mode(state, BrowserMode::Scroll),
         KeyCode::Char('v') => switch_mode(state, BrowserMode::Selection),
-        KeyCode::Char('?') | KeyCode::Char('h') => {
-            state.overlay = None;
-            state.status = String::from("Close overlays");
-        }
+        KeyCode::Char('?') => toggle_overlay(state, jaringan_browser::Overlay::Help),
+        KeyCode::Char('h') => toggle_overlay(state, jaringan_browser::Overlay::Help),
         KeyCode::Char('H') => toggle_overlay(state, jaringan_browser::Overlay::History),
         KeyCode::Char('B') => toggle_overlay(state, jaringan_browser::Overlay::Bookmarks),
         KeyCode::Char('f') if ctrl => {
@@ -1298,7 +1300,9 @@ fn draw_tab_bar(frame: &mut ratatui::Frame<'_>, tabs: &[Tab], active_tab: usize,
         let label = if tab.page.location == PageLocation::File(PathBuf::from("welcome")) {
             format!(" Welcome{watch_mark} ")
         } else if title.len() > 20 {
-            format!(" {}…{watch_mark} ", &title[..18])
+            // Char-boundary safe truncation (avoid UTF-8 panic)
+            let trunc_len = title.floor_char_boundary(18);
+            format!(" {}…{watch_mark} ", &title[..trunc_len])
         } else {
             format!(" {title}{watch_mark} ")
         };
