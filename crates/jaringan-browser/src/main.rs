@@ -35,7 +35,7 @@ use jaringan_protocol::{
 use jaringan_plugins::PluginRegistry;
 use jaringan_plugins::plugin::PluginHook;
 use jaringan_render::render_plain;
-use jaringan_script::{BridgeState, ScriptInput, WasmRuntime, execute_document_scripts};
+use jaringan_script::{BridgeState, ScriptInput, WasmRuntime, blocks_to_script_blocks, execute_document_scripts};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -88,6 +88,14 @@ enum Command {
         url: String,
         /// The button id or label to click.
         button: String,
+    },
+    /// Execute a WASM script from a jrg:// page and print the output as JSON.
+    Run {
+        /// The jrg:// URL to fetch and execute scripts from.
+        url: String,
+        /// Optional script label to run. If omitted, runs the first script block.
+        #[arg(long, short)]
+        script: Option<String>,
     },
     /// Serve a local document root over the TCP wire protocol.
     Serve {
@@ -508,6 +516,78 @@ fn main() -> anyhow::Result<()> {
             });
 
             println!("{}", serde_json::to_string_pretty(&manifest)?);
+        }
+        Command::Run { url, script } => {
+            let parsed = JaringanUrl::parse(&url)?;
+            let response = fetch_tcp(&parsed)
+                .with_context(|| format!("failed to fetch {url}"))?;
+            let doc = parse_document(&response.body)
+                .with_context(|| format!("failed to parse document from {url}"))?;
+
+            // Find the matching Script block
+            let (wasm, label) = match script {
+                Some(ref label) => {
+                    let found = doc.blocks.iter().find_map(|b| {
+                        if let Block::Script { wasm, label: lbl } = b {
+                            if lbl.as_deref() == Some(label.as_str()) {
+                                return Some((wasm.clone(), lbl.clone()));
+                            }
+                        }
+                        None
+                    });
+                    match found {
+                        Some(pair) => pair,
+                        None => {
+                            let err = serde_json::json!({"error": format!("script label '{}' not found", label)});
+                            println!("{}", serde_json::to_string_pretty(&err)?);
+                            return Ok(());
+                        }
+                    }
+                }
+                None => {
+                    let found = doc.blocks.iter().find_map(|b| {
+                        if let Block::Script { wasm, label } = b {
+                            Some((wasm.clone(), label.clone()))
+                        } else {
+                            None
+                        }
+                    });
+                    match found {
+                        Some(pair) => pair,
+                        None => {
+                            let err = serde_json::json!({"error": "no script blocks found in document"});
+                            println!("{}", serde_json::to_string_pretty(&err)?);
+                            return Ok(());
+                        }
+                    }
+                }
+            };
+
+            // Build the script input from the document's blocks
+            let input = ScriptInput {
+                title: doc.title().map(|s| s.to_string()),
+                inputs: Vec::new(),
+                page_metadata: None,
+                blocks: blocks_to_script_blocks(&doc.blocks),
+                tui: None,
+            };
+
+            // Create runtime and execute
+            let runtime = WasmRuntime::new()
+                .with_context(|| "failed to create WASM runtime")?;
+
+            let bridge = BridgeState::empty();
+            let output = runtime.execute_with_bridge(&wasm, &input, bridge)
+                .with_context(|| "script execution failed")?;
+
+            // Build JSON output
+            let result = serde_json::json!({
+                "url": url,
+                "script_label": label,
+                "output_blocks": output.blocks,
+            });
+
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Serve {
             root,
