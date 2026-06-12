@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env, fs,
     io::{self, Stdout},
     net::TcpListener,
@@ -72,6 +73,14 @@ enum Command {
     Inspect {
         /// The jrg:// URL to inspect.
         url: String,
+    },
+    /// Fill named input fields on a jrg:// page and print the updated state as JSON.
+    Fill {
+        /// The jrg:// URL to fill.
+        url: String,
+        /// Input field name=value pairs to set.
+        #[arg(long, short)]
+        field: Vec<String>,
     },
     /// Serve a local document root over the TCP wire protocol.
     Serve {
@@ -328,6 +337,75 @@ fn main() -> anyhow::Result<()> {
                 "buttons": buttons,
                 "scripts": scripts,
                 "links": links,
+                "blocks": block_types,
+            });
+
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+        }
+        Command::Fill { url, field } => {
+            let parsed = JaringanUrl::parse(&url)?;
+            let response = fetch_tcp(&parsed)
+                .with_context(|| format!("failed to fetch {url}"))?;
+            let doc = parse_document(&response.body)
+                .with_context(|| format!("failed to parse document from {url}"))?;
+
+            let mut fields = HashMap::new();
+            for f in &field {
+                if let Some((name, value)) = f.split_once('=') {
+                    fields.insert(name.to_string(), value.to_string());
+                }
+            }
+
+            let block_types: Vec<_> = doc.blocks.iter().map(|b| {
+                let type_name = match b {
+                    Block::Heading { .. } => "heading",
+                    Block::Paragraph(_) => "paragraph",
+                    Block::Link(_) => "link",
+                    Block::Input(_) => "input",
+                    Block::Button(_) => "button",
+                    Block::Image(_) => "image",
+                    Block::Quote(_) => "quote",
+                    Block::List(_) => "list",
+                    Block::Rule => "rule",
+                    Block::Table(_) => "table",
+                    Block::Preformatted { .. } => "preformatted",
+                    Block::Script { .. } => "script",
+                };
+                let text = match b {
+                    Block::Paragraph(s) => Some(s.clone()),
+                    Block::Quote(s) => Some(s.clone()),
+                    Block::Heading { text, .. } => Some(text.clone()),
+                    Block::Preformatted { code, .. } => Some(code.clone()),
+                    _ => None,
+                };
+                serde_json::json!({
+                    "type": type_name,
+                    "text": text,
+                })
+            }).collect();
+
+            let mut updated_blocks = doc.blocks.clone();
+            for block in &mut updated_blocks {
+                if let Block::Input(input) = block {
+                    if let Some(value) = fields.get(&input.name) {
+                        input.value = value.clone();
+                    }
+                }
+            }
+
+            let inputs: Vec<_> = updated_blocks.iter().filter_map(|b| match b {
+                Block::Input(input) => Some(serde_json::json!({
+                    "name": input.name,
+                    "label": input.label,
+                    "value": input.value,
+                    "placeholder": input.placeholder,
+                })),
+                _ => None,
+            }).collect();
+
+            let manifest = serde_json::json!({
+                "url": url,
+                "inputs": inputs,
                 "blocks": block_types,
             });
 
