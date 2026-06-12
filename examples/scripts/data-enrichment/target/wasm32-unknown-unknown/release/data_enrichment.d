@@ -1,0 +1,1 @@
+/home/lekmon/jaringan/examples/scripts/data-enrichment/target/wasm32-unknown-unknown/release/data_enrichment.wasm: /home/lekmon/jaringan/crates/jaringan-script-sdk/src/lib.rs /home/lekmon/jaringan/examples/scripts/data-enrichment/src/lib.rs

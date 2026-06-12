@@ -1,0 +1,1 @@
+/home/lekmon/jaringan/examples/scripts/dynamic-include/target/wasm32-unknown-unknown/release/libdynamic_include.rlib: /home/lekmon/jaringan/crates/jaringan-script-sdk/src/lib.rs /home/lekmon/jaringan/examples/scripts/dynamic-include/src/lib.rs

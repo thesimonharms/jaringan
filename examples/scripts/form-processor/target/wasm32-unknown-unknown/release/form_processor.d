@@ -1,0 +1,1 @@
+/home/lekmon/jaringan/examples/scripts/form-processor/target/wasm32-unknown-unknown/release/form_processor.wasm: /home/lekmon/jaringan/crates/jaringan-script-sdk/src/lib.rs /home/lekmon/jaringan/examples/scripts/form-processor/src/lib.rs
