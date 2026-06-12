@@ -82,6 +82,13 @@ enum Command {
         #[arg(long, short)]
         field: Vec<String>,
     },
+    /// Click a button by id or label on a jrg:// page and print the result page as JSON blocks.
+    Click {
+        /// The jrg:// URL to fetch and interact with.
+        url: String,
+        /// The button id or label to click.
+        button: String,
+    },
     /// Serve a local document root over the TCP wire protocol.
     Serve {
         root: PathBuf,
@@ -407,6 +414,97 @@ fn main() -> anyhow::Result<()> {
                 "url": url,
                 "inputs": inputs,
                 "blocks": block_types,
+            });
+
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+        }
+        Command::Click { url, button } => {
+            let parsed = JaringanUrl::parse(&url)?;
+            let response = fetch_tcp(&parsed)
+                .with_context(|| format!("failed to fetch {url}"))?;
+            let doc = parse_document(&response.body)
+                .with_context(|| format!("failed to parse document from {url}"))?;
+
+            // Find the first Button block whose id or label matches
+            let found = doc.blocks.iter().find_map(|b| {
+                if let Block::Button(btn) = b {
+                    if btn.id == button || btn.label == button {
+                        return Some(btn);
+                    }
+                }
+                None
+            });
+
+            let found = match found {
+                Some(btn) => btn,
+                None => {
+                    let err = serde_json::json!({"error": "button not found"});
+                    println!("{}", serde_json::to_string_pretty(&err)?);
+                    return Ok(());
+                }
+            };
+
+            // Resolve target (relative or absolute)
+            let target_url = JaringanUrl::parse(&found.target).unwrap_or_else(|_| {
+                parsed.resolve(&found.target)
+                    .expect("failed to resolve relative button target")
+            });
+
+            // Execute the button action
+            let response = match found.method {
+                ActionMethod::Get => {
+                    fetch_tcp(&target_url)
+                        .with_context(|| format!("failed to fetch button target {}", target_url))?
+                }
+                ActionMethod::Post => {
+                    // Construct POST body — include button id as minimal payload
+                    let body = format!("button={}", found.id);
+                    if let Some(ref auth) = found.auth {
+                        post_tcp_with_action_token(&target_url, body, auth)
+                            .with_context(|| format!("failed to POST button action to {}", target_url))?
+                    } else {
+                        post_tcp(&target_url, body)
+                            .with_context(|| format!("failed to POST button action to {}", target_url))?
+                    }
+                }
+            };
+
+            let result_doc = parse_document(&response.body)
+                .with_context(|| format!("failed to parse response from {}", target_url))?;
+
+            let blocks: Vec<_> = result_doc.blocks.iter().map(|b| {
+                let type_name = match b {
+                    Block::Heading { .. } => "heading",
+                    Block::Paragraph(_) => "paragraph",
+                    Block::Link(_) => "link",
+                    Block::Input(_) => "input",
+                    Block::Button(_) => "button",
+                    Block::Image(_) => "image",
+                    Block::Quote(_) => "quote",
+                    Block::List(_) => "list",
+                    Block::Rule => "rule",
+                    Block::Table(_) => "table",
+                    Block::Preformatted { .. } => "preformatted",
+                    Block::Script { .. } => "script",
+                };
+                let text = match b {
+                    Block::Paragraph(s) => Some(s.clone()),
+                    Block::Quote(s) => Some(s.clone()),
+                    Block::Heading { text, .. } => Some(text.clone()),
+                    Block::Preformatted { code, .. } => Some(code.clone()),
+                    _ => None,
+                };
+                serde_json::json!({
+                    "type": type_name,
+                    "text": text,
+                })
+            }).collect();
+
+            let manifest = serde_json::json!({
+                "url": format!("{}", target_url),
+                "title": result_doc.title(),
+                "button": button,
+                "blocks": blocks,
             });
 
             println!("{}", serde_json::to_string_pretty(&manifest)?);
