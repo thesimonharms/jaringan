@@ -1,4 +1,4 @@
-use jaringan_core::{Block, Document, Table};
+use jaringan_core::{Alignment, Block, Document, Table};
 use ratatui::text::{Line, Span, Text};
 use ratatui::style::{Style, Color, Modifier};
 use syntect::parsing::SyntaxSet;
@@ -484,23 +484,28 @@ fn render_table_plain(table: &Table) -> String {
     }
 
     let mut output = String::new();
-    output.push_str(&render_table_row(&table.headers, &widths));
+    output.push_str(&render_table_row(&table.headers, &widths, &table.alignments));
     output.push('\n');
     output.push_str(&render_table_separator(&widths));
     for row in &table.rows {
         output.push('\n');
-        output.push_str(&render_table_row(row, &widths));
+        output.push_str(&render_table_row(row, &widths, &table.alignments));
     }
     output
 }
 
-fn render_table_row(row: &[String], widths: &[usize]) -> String {
+fn render_table_row(row: &[String], widths: &[usize], alignments: &[Alignment]) -> String {
     let cells = widths
         .iter()
         .enumerate()
         .map(|(index, width)| {
             let cell = row.get(index).map(String::as_str).unwrap_or("");
-            format!(" {cell:<width$} ")
+            let align = alignments.get(index).copied().unwrap_or(Alignment::None);
+            match align {
+                Alignment::None | Alignment::Left => format!(" {cell:<width$} "),
+                Alignment::Center => format!(" {cell:^width$} "),
+                Alignment::Right => format!(" {cell:>width$} "),
+            }
         })
         .collect::<Vec<_>>()
         .join("|");

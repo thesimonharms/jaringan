@@ -72,10 +72,27 @@ pub enum Block {
     },
 }
 
+/// Column alignment for table cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Alignment {
+    /// No explicit alignment (renderer default).
+    #[default]
+    None,
+    /// Left-aligned (`:---` in separator row).
+    Left,
+    /// Center-aligned (`:---:` in separator row).
+    Center,
+    /// Right-aligned (`---:` in separator row).
+    Right,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Table {
     pub headers: Vec<String>,
     pub rows: Vec<Vec<String>>,
+    /// Column alignment hints parsed from the separator row.
+    /// Empty means no alignment specified (renderer default).
+    pub alignments: Vec<Alignment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -759,15 +776,24 @@ impl<'a> Parser<'a> {
 
     fn parse_table(&mut self) {
         let mut rows = Vec::new();
+        let mut alignments: Vec<Alignment> = Vec::new();
+        let mut found_separator = false;
         while let Some(line) = self.peek() {
             let trimmed = line.trim();
             if !trimmed.starts_with('|') {
                 break;
             }
             let cells = parse_table_row(trimmed);
-            if !is_table_separator(&cells) {
-                rows.push(cells);
+            if is_table_separator(&cells) {
+                if !found_separator {
+                    // Parse alignment from the first separator row (comes after headers in standard Markdown)
+                    alignments = parse_table_alignments(&cells);
+                    found_separator = true;
+                }
+                self.cursor += 1;
+                continue;
             }
+            rows.push(cells);
             self.cursor += 1;
         }
 
@@ -775,7 +801,11 @@ impl<'a> Parser<'a> {
             return;
         }
         let headers = rows.remove(0);
-        self.blocks.push(Block::Table(Table { headers, rows }));
+        self.blocks.push(Block::Table(Table {
+            headers,
+            rows,
+            alignments,
+        }));
     }
 
     fn parse_quote(&mut self) {
@@ -935,6 +965,25 @@ fn is_table_separator(cells: &[String]) -> bool {
                 && trimmed.chars().all(|ch| matches!(ch, '-' | ':' | ' '))
                 && trimmed.chars().any(|ch| ch == '-')
         })
+}
+
+/// Parse column alignment hints from a table separator row.
+/// `:---` → Left, `:---:` → Center, `---:` → Right, `----` → None
+fn parse_table_alignments(cells: &[String]) -> Vec<Alignment> {
+    cells
+        .iter()
+        .map(|cell| {
+            let trimmed = cell.trim();
+            let starts_colon = trimmed.starts_with(':');
+            let ends_colon = trimmed.ends_with(':');
+            match (starts_colon, ends_colon) {
+                (true, true) => Alignment::Center,
+                (true, false) => Alignment::Left,
+                (false, true) => Alignment::Right,
+                (false, false) => Alignment::None,
+            }
+        })
+        .collect()
 }
 
 fn parse_link(line: &str) -> Option<Link> {
@@ -1170,9 +1219,30 @@ mod tests {
                     rows: vec![
                         vec!["Simon".into(), "Builder".into()],
                         vec!["Jaringan".into(), "Browser".into()]
-                    ]
+                    ],
+                    alignments: vec![Alignment::None, Alignment::None],
                 })
             ]
+        );
+    }
+
+    #[test]
+    fn parses_table_with_column_alignment() {
+        let doc = parse_document(
+            "| Left | Center | Right |\n|:---|---:|---:|\n| a | b | c |\n",
+        )
+        .unwrap();
+        assert_eq!(
+            doc.blocks[0],
+            Block::Table(Table {
+                headers: vec!["Left".into(), "Center".into(), "Right".into()],
+                rows: vec![vec!["a".into(), "b".into(), "c".into()]],
+                alignments: vec![
+                    Alignment::Left,
+                    Alignment::Right,
+                    Alignment::Right,
+                ],
+            })
         );
     }
 

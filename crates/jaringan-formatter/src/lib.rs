@@ -616,6 +616,7 @@ mod tests {
                 vec!["Alice".into(), "30".into()],
                 vec!["Bob".into(), "25".into()],
             ],
+            alignments: vec![],
         })]);
         let fmt = JrgFormatter::new(FormatOptions::default());
         let result = fmt.format_document(&doc);

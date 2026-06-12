@@ -96,6 +96,11 @@ pub struct ScriptOutput {
     pub blocks: Vec<ScriptBlock>,
 }
 
+/// Default fuel limit for WASM execution (1 million fuel units).
+/// This corresponds to roughly 1 million WebAssembly instructions before
+/// the runtime traps the script.
+const DEFAULT_FUEL_LIMIT: u64 = 1_000_000;
+
 /// Error type for WASM runtime operations.
 #[derive(Debug, thiserror::Error)]
 pub enum WasmError {
@@ -123,6 +128,8 @@ impl WasmRuntime {
         config.memory_reservation(64 * 1024 * 1024);
         // Limit WASM stack to 512 KB
         config.max_wasm_stack(512 * 1024);
+        // Enable fuel metering to prevent runaway WASM execution
+        config.consume_fuel(true);
         let engine = Engine::new(&config)?;
         Ok(Self { engine })
     }
@@ -155,6 +162,8 @@ impl WasmRuntime {
         bridge: BridgeState,
     ) -> Result<ScriptOutput, WasmError> {
         let mut store = Store::new(&self.engine, bridge);
+        // Set fuel limit to prevent runaway WASM execution
+        store.set_fuel(DEFAULT_FUEL_LIMIT)?;
         let module = Module::new(&self.engine, wasm_binary)?;
         let mut linker = Linker::new(&self.engine);
 
@@ -356,7 +365,11 @@ pub fn script_blocks_to_blocks(script_blocks: &[ScriptBlock]) -> Vec<jaringan_co
         ScriptBlock::Paragraph { text } => Block::Paragraph(text.clone()),
         ScriptBlock::Code { language, text } => Block::Preformatted { code: text.clone(), language: language.clone() },
         ScriptBlock::List { items, .. } => Block::List(items.clone()),
-        ScriptBlock::Table { headers, rows } => Block::Table(Table { headers: headers.clone(), rows: rows.clone() }),
+        ScriptBlock::Table { headers, rows } => Block::Table(Table {
+                headers: headers.clone(),
+                rows: rows.clone(),
+                alignments: vec![],
+            }),
         ScriptBlock::Image { url, alt } => Block::Image(Image { source: url.clone(), alt: alt.clone().unwrap_or_default() }),
         ScriptBlock::Link { url, text } => Block::Link(Link { target: url.clone(), label: text.clone() }),
         ScriptBlock::Quote { text, .. } => Block::Quote(text.clone()),
@@ -536,6 +549,7 @@ mod tests {
             Block::Table(Table {
                 headers: vec!["A".into()],
                 rows: vec![vec!["1".into()]],
+                alignments: vec![],
             }),
             Block::Preformatted { code: "code".into(), language: None },
         ];
