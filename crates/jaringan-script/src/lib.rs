@@ -2,6 +2,7 @@ pub mod bridge;
 
 pub use bridge::{BridgeState, read_string, write_error, write_json};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use wasmtime::{AsContext, AsContextMut, Caller, Engine, Linker, Memory, Module, Store};
 
 /// A single input field for a script's UI form.
@@ -266,6 +267,72 @@ impl WasmRuntime {
                         write_json(&mem, &mut ctx, "{}")
                     }
                 }
+            },
+        )?;
+
+        // (import "jaringan" "store_get" (func (param i32 i32) (result i32)))
+        linker.func_wrap(
+            "jaringan",
+            "store_get",
+            |mut caller: Caller<'_, BridgeState>, key_ptr: i32, key_len: i32| -> i32 {
+                let mem = caller
+                    .get_export("memory")
+                    .and_then(|e| e.into_memory())
+                    .expect("memory export required for jaringan.store_get");
+
+                let key = {
+                    let ctx = caller.as_context();
+                    read_string(&mem, &ctx, key_ptr, key_len)
+                };
+
+                let state = caller.data();
+                match &state.store {
+                    Some(map) => {
+                        let value = map.get(&key).cloned().unwrap_or_default();
+                        let mut ctx = caller.as_context_mut();
+                        let json = serde_json::json!({ "value": value });
+                        write_json(
+                            &mem,
+                            &mut ctx,
+                            &serde_json::to_string(&json).unwrap_or_default(),
+                        )
+                    }
+                    None => {
+                        let mut ctx = caller.as_context_mut();
+                        let json = serde_json::json!({ "value": "" });
+                        write_json(
+                            &mem,
+                            &mut ctx,
+                            &serde_json::to_string(&json).unwrap_or_default(),
+                        )
+                    }
+                }
+            },
+        )?;
+
+        // (import "jaringan" "store_set" (func (param i32 i32 i32 i32) (result i32)))
+        linker.func_wrap(
+            "jaringan",
+            "store_set",
+            |mut caller: Caller<'_, BridgeState>, key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32| -> i32 {
+                let mem = caller
+                    .get_export("memory")
+                    .and_then(|e| e.into_memory())
+                    .expect("memory export required for jaringan.store_set");
+
+                let key = {
+                    let ctx = caller.as_context();
+                    read_string(&mem, &ctx, key_ptr, key_len)
+                };
+                let value = {
+                    let ctx = caller.as_context();
+                    read_string(&mem, &ctx, val_ptr, val_len)
+                };
+
+                let state = caller.data_mut();
+                let map = state.store.get_or_insert_with(HashMap::new);
+                map.insert(key, value);
+                0
             },
         )?;
 
@@ -591,6 +658,7 @@ mod tests {
                 assert_eq!(level, "info");
                 assert_eq!(msg, "Hello from WASM");
             })),
+            store: None,
         };
 
         let input = ScriptInput {

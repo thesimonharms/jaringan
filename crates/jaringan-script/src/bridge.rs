@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use wasmtime::{AsContext, AsContextMut, Memory};
 
@@ -7,6 +8,7 @@ pub struct BridgeState {
     pub fetch_fn: Option<Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>>,
     pub navigate_fn: Option<Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>>,
     pub log_fn: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
+    pub store: Option<HashMap<String, String>>,
 }
 
 impl BridgeState {
@@ -16,6 +18,7 @@ impl BridgeState {
             fetch_fn: None,
             navigate_fn: None,
             log_fn: None,
+            store: None,
         }
     }
 }

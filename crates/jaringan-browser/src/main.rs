@@ -737,6 +737,7 @@ fn run_app(
         log_fn: Some(std::sync::Arc::new(|level: &str, msg: &str| {
             eprintln!("[jaringan:bridge/{level}] {msg}");
         })),
+        store: None,
     });
 
     // Initialize plugin registry from ~/.config/jaringan/plugins/

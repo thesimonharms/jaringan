@@ -75,6 +75,8 @@ extern "C" {
     fn fetch(ptr: i32, len: i32) -> i32;
     fn log(level_ptr: i32, level_len: i32, msg_ptr: i32, msg_len: i32);
     fn navigate(ptr: i32, len: i32) -> i32;
+    fn store_get(key_ptr: i32, key_len: i32) -> i32;
+    fn store_set(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> i32;
 }
 
 // ── Memory constants ────────────────────────────────────────────────
@@ -182,4 +184,33 @@ pub fn js_navigate(url: &str) -> Result<String, String> {
         String::from_utf8(v).unwrap_or_default()
     };
     Ok(result)
+}
+
+/// Get a value from the host-side KV store by key.
+pub fn js_store_get(key: &str) -> Result<String, String> {
+    let key_bytes = key.as_bytes();
+    unsafe {
+        core::ptr::copy_nonoverlapping(key_bytes.as_ptr(), SCRATCH as *mut u8, key_bytes.len());
+    }
+    let _result_ptr = unsafe { store_get(SCRATCH as i32, key_bytes.len() as i32) };
+    let result = unsafe {
+        let len = core::ptr::read_unaligned(OUTPUT as *const u32);
+        let slice = core::slice::from_raw_parts((OUTPUT + 4) as *const u8, len as usize);
+        let v: Vec<u8> = slice.to_vec();
+        String::from_utf8(v).unwrap_or_default()
+    };
+    Ok(result)
+}
+
+/// Set a value in the host-side KV store by key.
+pub fn js_store_set(key: &str, value: &str) -> i32 {
+    unsafe {
+        store_set(
+            key.as_ptr() as i32,
+            key.len() as i32,
+            value.as_ptr() as i32,
+            value.len() as i32,
+        );
+    }
+    0
 }
