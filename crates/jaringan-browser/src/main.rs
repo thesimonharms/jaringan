@@ -915,6 +915,7 @@ fn run_app(
         })),
         store: None,
         resolve_fn: None,
+        page_inputs: None,
     });
 
     // Initialize plugin registry from ~/.config/jaringan/plugins/

@@ -78,6 +78,7 @@ extern "C" {
     fn store_get(key_ptr: i32, key_len: i32) -> i32;
     fn store_set(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> i32;
     fn resolve(ptr: i32, len: i32) -> i32;
+    fn input(ptr: i32, len: i32) -> i32;
 }
 
 // ── Memory constants ────────────────────────────────────────────────
@@ -223,6 +224,24 @@ pub fn js_resolve(url: &str) -> Result<String, String> {
         core::ptr::copy_nonoverlapping(url_bytes.as_ptr(), SCRATCH as *mut u8, url_bytes.len());
     }
     let _result_ptr = unsafe { resolve(SCRATCH as i32, url_bytes.len() as i32) };
+    let result = unsafe {
+        let len = core::ptr::read_unaligned(OUTPUT as *const u32);
+        let slice = core::slice::from_raw_parts((OUTPUT + 4) as *const u8, len as usize);
+        let v: Vec<u8> = slice.to_vec();
+        String::from_utf8(v).unwrap_or_default()
+    };
+    Ok(result)
+}
+
+/// Read the current value of a named input field via `jaringan.input`.
+///
+/// Returns a JSON string containing the field value, e.g. `{"value":"some text"}`.
+pub fn js_input(name: &str) -> Result<String, String> {
+    let name_bytes = name.as_bytes();
+    unsafe {
+        core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), SCRATCH as *mut u8, name_bytes.len());
+    }
+    let _result_ptr = unsafe { input(SCRATCH as i32, name_bytes.len() as i32) };
     let result = unsafe {
         let len = core::ptr::read_unaligned(OUTPUT as *const u32);
         let slice = core::slice::from_raw_parts((OUTPUT + 4) as *const u8, len as usize);

@@ -371,6 +371,44 @@ impl WasmRuntime {
             },
         )?;
 
+        // (import "jaringan" "input" (func (param i32 i32) (result i32)))
+        linker.func_wrap(
+            "jaringan",
+            "input",
+            |mut caller: Caller<'_, BridgeState>, name_ptr: i32, name_len: i32| -> i32 {
+                let mem = caller
+                    .get_export("memory")
+                    .and_then(|e| e.into_memory())
+                    .expect("memory export required for jaringan.input");
+
+                let name = {
+                    let ctx = caller.as_context();
+                    read_string(&mem, &ctx, name_ptr, name_len)
+                };
+
+                let state = caller.data();
+                match &state.page_inputs {
+                    Some(inputs) => {
+                        let value = inputs.get(&name).cloned().unwrap_or_default();
+                        let mut ctx = caller.as_context_mut();
+                        write_json(
+                            &mem,
+                            &mut ctx,
+                            &serde_json::json!({"value": value}).to_string(),
+                        )
+                    }
+                    None => {
+                        let mut ctx = caller.as_context_mut();
+                        write_json(
+                            &mem,
+                            &mut ctx,
+                            &serde_json::json!({"value": ""}).to_string(),
+                        )
+                    }
+                }
+            },
+        )?;
+
         // ── Instantiate ──────────────────────────────────────────────────────
         let instance = linker.instantiate(&mut store, &module)?;
 
@@ -695,6 +733,7 @@ mod tests {
             })),
             store: None,
             resolve_fn: None,
+            page_inputs: None,
         };
 
         let input = ScriptInput {
