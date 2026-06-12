@@ -68,6 +68,11 @@ enum Command {
         #[arg(long)]
         encrypted_key_id: Option<String>,
     },
+    /// Inspect a jrg:// URL and print a JSON manifest of interactive elements.
+    Inspect {
+        /// The jrg:// URL to inspect.
+        url: String,
+    },
     /// Serve a local document root over the TCP wire protocol.
     Serve {
         root: PathBuf,
@@ -243,6 +248,90 @@ fn main() -> anyhow::Result<()> {
                 fetch_tcp(&url)?
             };
             print_response(response);
+        }
+        Command::Inspect { url } => {
+            let parsed = JaringanUrl::parse(&url)?;
+            let response = fetch_tcp(&parsed)
+                .with_context(|| format!("failed to fetch {url}"))?;
+            let doc = parse_document(&response.body)
+                .with_context(|| format!("failed to parse document from {url}"))?;
+
+            let inputs: Vec<_> = doc.blocks.iter().filter_map(|b| match b {
+                Block::Input(input) => Some(serde_json::json!({
+                    "name": input.name,
+                    "label": input.label,
+                    "value": input.value,
+                    "placeholder": input.placeholder,
+                })),
+                _ => None,
+            }).collect();
+
+            let buttons: Vec<_> = doc.blocks.iter().filter_map(|b| match b {
+                Block::Button(btn) => Some(serde_json::json!({
+                    "id": btn.id,
+                    "label": btn.label,
+                    "method": format!("{:?}", btn.method),
+                    "target": btn.target,
+                    "confirm": btn.confirm,
+                })),
+                _ => None,
+            }).collect();
+
+            let scripts: Vec<_> = doc.blocks.iter().filter_map(|b| match b {
+                Block::Script { label, .. } => Some(serde_json::json!({
+                    "label": label,
+                })),
+                _ => None,
+            }).collect();
+
+            let links: Vec<_> = doc.blocks.iter().enumerate().filter_map(|(i, b)| match b {
+                Block::Link(link) => Some(serde_json::json!({
+                    "index": i,
+                    "label": link.label,
+                    "target": link.target,
+                })),
+                _ => None,
+            }).collect();
+
+            let block_types: Vec<_> = doc.blocks.iter().map(|b| {
+                let type_name = match b {
+                    Block::Heading { .. } => "heading",
+                    Block::Paragraph(_) => "paragraph",
+                    Block::Link(_) => "link",
+                    Block::Input(_) => "input",
+                    Block::Button(_) => "button",
+                    Block::Image(_) => "image",
+                    Block::Quote(_) => "quote",
+                    Block::List(_) => "list",
+                    Block::Rule => "rule",
+                    Block::Table(_) => "table",
+                    Block::Preformatted { .. } => "preformatted",
+                    Block::Script { .. } => "script",
+                };
+                let text = match b {
+                    Block::Paragraph(s) => Some(s.clone()),
+                    Block::Quote(s) => Some(s.clone()),
+                    Block::Heading { text, .. } => Some(text.clone()),
+                    Block::Preformatted { code, .. } => Some(code.clone()),
+                    _ => None,
+                };
+                serde_json::json!({
+                    "type": type_name,
+                    "text": text,
+                })
+            }).collect();
+
+            let manifest = serde_json::json!({
+                "url": url,
+                "title": doc.title(),
+                "inputs": inputs,
+                "buttons": buttons,
+                "scripts": scripts,
+                "links": links,
+                "blocks": block_types,
+            });
+
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
         Command::Serve {
             root,
