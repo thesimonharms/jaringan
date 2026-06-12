@@ -880,10 +880,17 @@ fn parse_heading(line: &str) -> Option<Block> {
         return None;
     }
 
-    let text = line.get(hashes..)?.strip_prefix(' ')?;
+    let text = line.get(hashes..).and_then(|s| {
+        if s.is_empty() {
+            Some(s)
+        } else {
+            s.strip_prefix(' ').or(Some(s))
+        }
+    })?.trim();
+    let text = if text.is_empty() { None } else { Some(text.to_owned()) }?;
     Some(Block::Heading {
         level: hashes as u8,
-        text: text.trim().to_owned(),
+        text,
     })
 }
 

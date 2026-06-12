@@ -116,9 +116,14 @@ pub struct WasmRuntime {
 }
 
 impl WasmRuntime {
-    /// Create a new runtime with a default wasmtime engine.
+    /// Create a new runtime with memory and stack limits for sandboxing.
     pub fn new() -> Result<Self, WasmError> {
-        let engine = Engine::default();
+        let mut config = wasmtime::Config::default();
+        // Limit WASM memory to 64 MB per instance (reservation + growth cap)
+        config.memory_reservation(64 * 1024 * 1024);
+        // Limit WASM stack to 512 KB
+        config.max_wasm_stack(512 * 1024);
+        let engine = Engine::new(&config)?;
         Ok(Self { engine })
     }
 

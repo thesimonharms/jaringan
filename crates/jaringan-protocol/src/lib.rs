@@ -750,7 +750,16 @@ pub fn fetch_tcp(url: &JaringanUrl) -> Result<Response, WireError> {
 }
 
 pub fn post_tcp(url: &JaringanUrl, body: String) -> Result<Response, WireError> {
-    send_tcp_with_timeout(Request::post(url.clone(), body), Duration::from_secs(30))
+    post_tcp_with_timeout(url, body, Duration::from_secs(30))
+}
+
+/// Like `post_tcp` but with a configurable timeout.
+pub fn post_tcp_with_timeout(
+    url: &JaringanUrl,
+    body: String,
+    timeout: Duration,
+) -> Result<Response, WireError> {
+    send_tcp_with_timeout(Request::post(url.clone(), body), timeout)
 }
 
 pub fn post_tcp_with_action_token(

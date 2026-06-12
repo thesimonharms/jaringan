@@ -39,6 +39,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use tokio::signal;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -47,7 +48,7 @@ use jaringan_protocol::{
     JaringanUrl,
     ResponseTag,
     fetch_tcp_stream_with_timeout,
-    fetch_tcp_with_timeout, post_tcp,
+    fetch_tcp_with_timeout, post_tcp_with_timeout,
 };
 
 /// Maximum request body size (10 MB). Prevents OOM from large POST bodies.
@@ -145,6 +146,7 @@ impl HttpToJrgGateway {
         );
 
         axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown_signal())
             .await
             .map_err(|e| GatewayError::Config(format!("serve failed: {e}")))?;
 
@@ -437,7 +439,7 @@ fn fetch_via_jrg_inner(
             fetch_tcp_with_timeout(url, timeout).map_err(GatewayError::JrgProtocol)?
         }
         Method::POST | Method::PUT | Method::PATCH | Method::DELETE => {
-            post_tcp(url, request_body.to_string()).map_err(GatewayError::JrgProtocol)?
+            post_tcp_with_timeout(url, request_body.to_string(), timeout).map_err(GatewayError::JrgProtocol)?
         }
         _ => {
             return Err(GatewayError::Config(format!(
@@ -527,6 +529,33 @@ fn urlencode(s: &str) -> String {
         }
     }
     result
+}
+
+/// Listen for SIGINT or SIGTERM to trigger graceful shutdown.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    eprintln!("Shutdown signal received, draining in-flight requests...");
 }
 
 #[cfg(test)]
