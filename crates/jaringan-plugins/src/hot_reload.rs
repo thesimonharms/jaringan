@@ -27,9 +27,9 @@ impl PluginWatcher {
 
     /// Returns true if a .wasm file was changed/created/deleted.
     pub fn has_plugin_change(&self) -> bool {
-        self.poll().map_or(false, |event| {
+        self.poll().is_some_and(|event| {
             matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_))
-                && event.paths.iter().any(|p| p.extension().map_or(false, |e| e == "wasm"))
+                && event.paths.iter().any(|p| p.extension().is_some_and(|e| e == "wasm"))
         })
     }
 }

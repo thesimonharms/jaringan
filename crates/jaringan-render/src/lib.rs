@@ -12,7 +12,7 @@ static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(|| {
     SyntaxSet::load_defaults_newlines()
 });
 
-static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(|| ThemeSet::load_defaults());
+static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
 // ── Inline markup parsing ──────────────────────────────────────────────
 
@@ -56,8 +56,8 @@ pub fn parse_inline_markup(text: &str) -> Vec<InlineSpan> {
         if bytes[i] == b'[' {
             if let Some(close_bracket) = text[i + 1..].find(']') {
                 let after_bracket = i + 1 + close_bracket + 1;
-                if after_bracket < len && bytes[after_bracket] == b'(' {
-                    if let Some(close_paren) = text[after_bracket + 1..].find(')') {
+                if after_bracket < len && bytes[after_bracket] == b'('
+                    && let Some(close_paren) = text[after_bracket + 1..].find(')') {
                         let label = &text[i + 1..i + 1 + close_bracket];
                         let target = &text[after_bracket + 1..after_bracket + 1 + close_paren];
                         spans.push(InlineSpan::Link {
@@ -67,7 +67,6 @@ pub fn parse_inline_markup(text: &str) -> Vec<InlineSpan> {
                         i = after_bracket + 1 + close_paren + 1;
                         continue;
                     }
-                }
             }
             // Unmatched [ — push as literal
             spans.push(InlineSpan::Text("[".to_string()));

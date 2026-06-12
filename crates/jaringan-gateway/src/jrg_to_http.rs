@@ -243,14 +243,13 @@ impl JrgToHttpResolver {
                     let tag_end = Self::find_tag_end(&bytes[i..]);
                     if let Some(end) = tag_end {
                         let tag_content = &bytes[i..i + end + 1];
-                        if let Some(alt) = Self::extract_attr(tag_content, b"alt") {
-                            if !alt.is_empty() {
+                        if let Some(alt) = Self::extract_attr(tag_content, b"alt")
+                            && !alt.is_empty() {
                                 if !result.is_empty() && !result.ends_with(' ') {
                                     result.push(' ');
                                 }
                                 result.push_str(&alt);
                             }
-                        }
                     }
                     in_tag = true;
                 } else {
@@ -392,7 +391,7 @@ impl PageResolver for JrgToHttpResolver {
 
         let response = http_req.send().map_err(|e| ResolveError::Read {
             path: std::path::PathBuf::from(&http_url),
-            source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+            source: std::io::Error::other(e.to_string()),
         })?;
 
         let http_status = response.status().as_u16();

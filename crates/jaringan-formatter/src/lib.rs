@@ -77,7 +77,7 @@ impl JrgFormatter {
                         out,
                         "{}{} {}",
                         "#".repeat(*level as usize),
-                        if *level > 0 { "" } else { "" },
+                        "",
                         text
                     );
                 }
@@ -166,7 +166,7 @@ impl JrgFormatter {
 
         // Build a line → block-type map for context
         let mut line_to_block: Vec<&str> = Vec::new();
-        for (_block_idx, block) in doc.blocks.iter().enumerate() {
+        for block in doc.blocks.iter() {
             let lines = self.block_source_lines(block);
             for _ in 0..lines {
                 line_to_block.push(match block {
@@ -238,8 +238,8 @@ impl JrgFormatter {
 
         // Rule: link-label-matches-target
         for (block_idx, block) in doc.blocks.iter().enumerate() {
-            if let Block::Link(link) = block {
-                if link.label == link.target {
+            if let Block::Link(link) = block
+                && link.label == link.target {
                     let line_num = source_line_for_block(source, block_idx);
                     issues.push(LintIssue {
                         level: LintLevel::Info,
@@ -251,13 +251,12 @@ impl JrgFormatter {
                         line: line_num,
                     });
                 }
-            }
         }
 
         // Rule: empty-paragraph
         for (block_idx, block) in doc.blocks.iter().enumerate() {
-            if let Block::Paragraph(text) = block {
-                if text.trim().is_empty() {
+            if let Block::Paragraph(text) = block
+                && text.trim().is_empty() {
                     let line_num = source_line_for_block(source, block_idx);
                     issues.push(LintIssue {
                         level: LintLevel::Warning,
@@ -266,7 +265,6 @@ impl JrgFormatter {
                         line: line_num,
                     });
                 }
-            }
         }
 
         // Rule: trailing-newline

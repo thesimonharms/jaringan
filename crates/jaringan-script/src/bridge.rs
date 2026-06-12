@@ -53,7 +53,7 @@ pub fn write_json<T: AsContextMut>(mem: &Memory, store: &mut T, json: &str) -> i
     // Grow memory if needed (wasm page = 64 KiB).
     let current_size = mem.size(&*store) as usize * 65_536;
     if offset + needed > current_size {
-        let pages_needed = (offset + needed - current_size + 65_535) / 65_536;
+        let pages_needed = (offset + needed - current_size).div_ceil(65_536);
         if mem.grow(&mut *store, pages_needed as u64).is_err() {
             return 0; // out of memory — return null pointer
         }

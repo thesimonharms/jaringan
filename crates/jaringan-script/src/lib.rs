@@ -182,9 +182,10 @@ impl WasmRuntime {
                     .expect("memory export required for jaringan.fetch");
 
                 // Read the URL string from WASM memory.
-                let ctx = caller.as_context();
-                let url = read_string(&mem, &ctx, url_ptr, url_len);
-                drop(ctx);
+                let url = {
+                    let ctx = caller.as_context();
+                    read_string(&mem, &ctx, url_ptr, url_len)
+                };
 
                 let state = caller.data(); // &BridgeState
 
@@ -218,10 +219,13 @@ impl WasmRuntime {
                     .and_then(|e| e.into_memory())
                     .expect("memory export required for jaringan.log");
 
-                let ctx = caller.as_context();
-                let level = read_string(&mem, &ctx, level_ptr, level_len);
-                let message = read_string(&mem, &ctx, msg_ptr, msg_len);
-                drop(ctx);
+                let (level, message) = {
+                    let ctx = caller.as_context();
+                    (
+                        read_string(&mem, &ctx, level_ptr, level_len),
+                        read_string(&mem, &ctx, msg_ptr, msg_len),
+                    )
+                };
 
                 let state = caller.data();
                 if let Some(ref log) = state.log_fn {
@@ -240,9 +244,10 @@ impl WasmRuntime {
                     .and_then(|e| e.into_memory())
                     .expect("memory export required for jaringan.navigate");
 
-                let ctx = caller.as_context();
-                let url = read_string(&mem, &ctx, url_ptr, url_len);
-                drop(ctx);
+                let url = {
+                    let ctx = caller.as_context();
+                    read_string(&mem, &ctx, url_ptr, url_len)
+                };
 
                 let state = caller.data();
                 match state.navigate_fn {
@@ -282,9 +287,9 @@ impl WasmRuntime {
         // Grow memory if needed to accommodate the input (plus a generous
         // output buffer).  Start writing at offset 0.
         let input_needed = input_len as u64 + 64 * 1024; // 64 KiB overhead
-        let current_size = memory.size(&store) as u64 * (64 * 1024); // wasm page = 64 KiB
+        let current_size = memory.size(&store) * (64 * 1024); // wasm page = 64 KiB
         if input_needed > current_size {
-            let pages_needed = (input_needed - current_size + 65_535) / 65_536;
+            let pages_needed = (input_needed - current_size).div_ceil(65_536);
             memory.grow(&mut store, pages_needed as u64)?;
         }
 

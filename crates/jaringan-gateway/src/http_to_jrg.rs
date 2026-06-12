@@ -303,11 +303,10 @@ async fn fetch_via_jrg_and_respond(
         let ttl = Duration::from_secs(config.cache_ttl_secs);
         let key = cache_key(http_method, jrg_url, body);
         let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(entry) = guard.get(&key) {
-            if entry.cached_at.elapsed() < ttl {
+        if let Some(entry) = guard.get(&key)
+            && entry.cached_at.elapsed() < ttl {
                 return Html(entry.html.clone()).into_response();
             }
-        }
     }
 
     let url = match JaringanUrl::parse(jrg_url) {
@@ -430,11 +429,10 @@ fn fetch_via_jrg_inner(
         let ttl = Duration::from_secs(config.cache_ttl_secs);
         let key = cache_key(http_method, jrg_url, request_body);
         let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(entry) = guard.get(&key) {
-            if entry.cached_at.elapsed() < ttl {
+        if let Some(entry) = guard.get(&key)
+            && entry.cached_at.elapsed() < ttl {
                 return Ok(entry.html.clone());
             }
-        }
     }
 
     let response = match *http_method {
@@ -464,11 +462,10 @@ fn fetch_via_jrg_inner(
             let now = Instant::now();
             guard.retain(|_, v| now.duration_since(v.cached_at) < Duration::from_secs(config.cache_ttl_secs));
             // If all entries are still fresh, evict the oldest one
-            if guard.len() >= config.cache_max_entries {
-                if let Some(oldest_key) = guard.iter().min_by_key(|(_, v)| v.cached_at).map(|(k, _)| k.clone()) {
+            if guard.len() >= config.cache_max_entries
+                && let Some(oldest_key) = guard.iter().min_by_key(|(_, v)| v.cached_at).map(|(k, _)| k.clone()) {
                     guard.remove(&oldest_key);
                 }
-            }
         }
 
         let insert_key = cache_key(http_method, jrg_url, request_body);
@@ -528,7 +525,7 @@ fn urlencode(s: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 result.push(byte as char);
             }
-            b' ' => result.push_str("+"),
+            b' ' => result.push('+'),
             _ => result.push_str(&format!("%{:02X}", byte)),
         }
     }

@@ -42,7 +42,7 @@ impl PluginRegistry {
         let mut entries: Vec<_> = std::fs::read_dir(dir)
             .map_err(|e| format!("read plugins dir: {e}"))?
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "wasm"))
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "wasm"))
             .collect();
         entries.sort_by_key(|e| e.path());
 

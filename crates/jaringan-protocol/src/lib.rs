@@ -888,14 +888,13 @@ fn read_response_header(reader: &mut BufReader<TcpStream>) -> Result<Response, W
             tags.push(ResponseTag::Stream);
         } else if let Some(value) = line.strip_prefix("Tag-Key:") {
             let value = value.trim();
-            if let Some((key_id, key_data)) = value.split_once(' ') {
-                if let Some(key_base64) = key_data.strip_prefix("ed25519:") {
+            if let Some((key_id, key_data)) = value.split_once(' ')
+                && let Some(key_base64) = key_data.strip_prefix("ed25519:") {
                     tags.push(ResponseTag::Key {
                         key_id: key_id.to_owned(),
                         key_base64: key_base64.to_owned(),
                     });
                 }
-            }
         } else if let Some(value) = line.strip_prefix("Tag-ContentType:") {
             tags.push(ResponseTag::ContentType {
                 value: value.trim().to_owned(),
@@ -1258,14 +1257,13 @@ pub fn read_response(reader: &mut impl Read) -> Result<Response, WireError> {
             tags.push(ResponseTag::Stream);
         } else if let Some(value) = line.strip_prefix("Tag-Key:") {
             let value = value.trim();
-            if let Some((key_id, key_data)) = value.split_once(' ') {
-                if let Some(key_base64) = key_data.strip_prefix("ed25519:") {
+            if let Some((key_id, key_data)) = value.split_once(' ')
+                && let Some(key_base64) = key_data.strip_prefix("ed25519:") {
                     tags.push(ResponseTag::Key {
                         key_id: key_id.to_owned(),
                         key_base64: key_base64.to_owned(),
                     });
                 }
-            }
         } else if let Some(value) = line.strip_prefix("Tag-ContentType:") {
             tags.push(ResponseTag::ContentType {
                 value: value.trim().to_owned(),
