@@ -1,17 +1,32 @@
-#![no_std]
+#![cfg_attr(target_arch = "wasm32", no_std)]
+#[cfg(not(target_arch = "wasm32"))]
+extern crate std;
+#[cfg(target_arch = "wasm32")]
 extern crate alloc;
 
 pub use serde_json;
 
+#[cfg(target_arch = "wasm32")]
 use alloc::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(target_arch = "wasm32")]
 use alloc::borrow::ToOwned;
+#[cfg(not(target_arch = "wasm32"))]
+use std::borrow::ToOwned;
+#[cfg(target_arch = "wasm32")]
 use alloc::string::String;
+#[cfg(not(target_arch = "wasm32"))]
+use std::string::String;
+#[cfg(target_arch = "wasm32")]
 use alloc::vec::Vec;
+#[cfg(not(target_arch = "wasm32"))]
+use std::vec::Vec;
+#[cfg(target_arch = "wasm32")]
 use core::panic::PanicInfo;
 
 // ── Panic handler for WASM targets ──────────────────────────────────
 
+#[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {}
@@ -19,12 +34,13 @@ fn panic(_info: &PanicInfo) -> ! {
 
 // ── Bump allocator for WASM ─────────────────────────────────────────
 
+#[cfg(target_arch = "wasm32")]
 /// A minimal bump allocator for use on `wasm32-unknown-unknown`.
-/// Allocates from a static 64 KB heap region.
 struct BumpAllocator {
     heap: AtomicUsize,
 }
 
+#[cfg(target_arch = "wasm32")]
 unsafe impl GlobalAlloc for BumpAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let size = layout.size().max(1);
@@ -40,12 +56,15 @@ unsafe impl GlobalAlloc for BumpAllocator {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 #[global_allocator]
 static ALLOCATOR: BumpAllocator = BumpAllocator {
     heap: AtomicUsize::new(0),
 };
 
+#[cfg(target_arch = "wasm32")]
 const HEAP_SIZE: usize = 64 * 1024;
+#[cfg(target_arch = "wasm32")]
 static mut HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
 // ── Host function declarations ──────────────────────────────────────
@@ -98,7 +117,7 @@ pub fn read_input(ptr: i32, len: i32) -> String {
         return String::new();
     }
     let slice = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
-    alloc::str::from_utf8(slice).unwrap_or_default().to_owned()
+    core::str::from_utf8(slice).unwrap_or_default().to_owned()
 }
 
 /// Write a string to the standard output buffer (offset 65536).
