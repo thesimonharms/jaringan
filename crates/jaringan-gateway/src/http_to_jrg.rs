@@ -36,6 +36,7 @@ use axum::{
 use std::{
     collections::HashMap,
     convert::Infallible,
+    hash::{Hash, Hasher},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -300,8 +301,9 @@ async fn fetch_via_jrg_and_respond(
     // Check cache first for GET requests
     if *http_method == Method::GET {
         let ttl = Duration::from_secs(config.cache_ttl_secs);
+        let key = cache_key(http_method, jrg_url, body);
         let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(entry) = guard.get(jrg_url) {
+        if let Some(entry) = guard.get(&key) {
             if entry.cached_at.elapsed() < ttl {
                 return Html(entry.html.clone()).into_response();
             }
@@ -426,8 +428,9 @@ fn fetch_via_jrg_inner(
     // For GET requests, check the cache first
     if *http_method == Method::GET {
         let ttl = Duration::from_secs(config.cache_ttl_secs);
+        let key = cache_key(http_method, jrg_url, request_body);
         let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(entry) = guard.get(jrg_url) {
+        if let Some(entry) = guard.get(&key) {
             if entry.cached_at.elapsed() < ttl {
                 return Ok(entry.html.clone());
             }
@@ -468,8 +471,9 @@ fn fetch_via_jrg_inner(
             }
         }
 
+        let insert_key = cache_key(http_method, jrg_url, request_body);
         guard.insert(
-            jrg_url.to_string(),
+            insert_key,
             CachedEntry {
                 html: html.clone(),
                 cached_at: Instant::now(),
@@ -529,6 +533,17 @@ fn urlencode(s: &str) -> String {
         }
     }
     result
+}
+
+/// Build a cache key from HTTP method, JRG URL, and request body hash.
+/// Two requests with the same URL but different bodies get different cache keys,
+/// preventing cache collisions from query parameters or distinct POST bodies.
+fn cache_key(method: &Method, url: &str, body: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    method.as_str().hash(&mut hasher);
+    url.hash(&mut hasher);
+    body.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
 }
 
 /// Listen for SIGINT or SIGTERM to trigger graceful shutdown.
@@ -634,14 +649,15 @@ mod tests {
         let cache = Arc::new(Mutex::new(HashMap::new()));
         let config = HttpToJrgGatewayConfig::default();
 
-        let key = "jrg://test/page.jrg";
+        let raw_key = "jrg://test/page.jrg";
+        let key = cache_key(&Method::GET, raw_key, "");
         let expected_html = "<html>cached</html>".to_string();
 
         // Insert a cached entry directly
         {
             let mut guard = cache.lock().unwrap();
             guard.insert(
-                key.to_string(),
+                key.clone(),
                 CachedEntry {
                     html: expected_html.clone(),
                     cached_at: Instant::now(),
@@ -650,14 +666,14 @@ mod tests {
         }
 
         // Verify fetch_via_jrg_inner returns the cached entry without fetching
-        let url = JaringanUrl::parse(key).unwrap();
+        let url = JaringanUrl::parse("jrg://test/page.jrg").unwrap();
         let method = Method::GET;
         let result = fetch_via_jrg_inner(
             &url,
             &method,
             "",
             Duration::from_secs(10),
-            key,
+            raw_key,
             &config,
             &cache,
         );
@@ -701,13 +717,14 @@ mod tests {
             ..Default::default()
         };
 
-        let key = "jrg://test/page.jrg";
+        let raw_key = "jrg://test/page.jrg";
 
-        // Insert a cached entry
+        // Insert a cached entry using the body-aware key
+        let cache_insert_key = cache_key(&Method::GET, raw_key, "");
         {
             let mut guard = cache.lock().unwrap();
             guard.insert(
-                key.to_string(),
+                cache_insert_key,
                 CachedEntry {
                     html: "<html>stale</html>".to_string(),
                     cached_at: Instant::now() - Duration::from_secs(1),
@@ -717,7 +734,7 @@ mod tests {
 
         // Even though the entry exists, TTL=0 means it should be treated as expired.
         // After that, fetch_via_jrg_inner will try a real TCP fetch which will fail.
-        let url = JaringanUrl::parse(key).unwrap();
+        let url = JaringanUrl::parse(raw_key).unwrap();
         let method = Method::GET;
 
         let result = fetch_via_jrg_inner(
@@ -725,7 +742,7 @@ mod tests {
             &method,
             "",
             Duration::from_secs(1),
-            key,
+            raw_key,
             &config,
             &cache,
         );
@@ -774,6 +791,41 @@ mod tests {
 
         // POST does not check cache, so it falls through to TCP fetch
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cache_body_collision_prevention() {
+        // Two requests to the same URL with different bodies should NOT share a cache entry
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+
+        let raw_url = "jrg://test/search.jrg";
+        let body_a = "q=hello";
+        let body_b = "q=world";
+
+        // Insert under body_a's key
+        let key_a = cache_key(&Method::GET, raw_url, body_a);
+        let key_b = cache_key(&Method::GET, raw_url, body_b);
+
+        assert_ne!(key_a, key_b, "different bodies must produce different cache keys");
+
+        {
+            let mut guard = cache.lock().unwrap();
+            guard.insert(
+                key_a,
+                CachedEntry {
+                    html: "<html>hello results</html>".to_string(),
+                    cached_at: Instant::now(),
+                },
+            );
+        }
+
+        // Lookup with body_b should miss (different key)
+        let lookup_key = cache_key(&Method::GET, raw_url, body_b);
+        let guard = cache.lock().unwrap();
+        assert!(
+            !guard.contains_key(&lookup_key),
+            "different body should not hit same cache entry"
+        );
     }
 
     #[test]

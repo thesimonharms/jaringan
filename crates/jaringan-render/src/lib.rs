@@ -14,6 +14,172 @@ static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(|| {
 
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(|| ThemeSet::load_defaults());
 
+// ── Inline markup parsing ──────────────────────────────────────────────
+
+/// A span of text with inline formatting applied.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InlineSpan {
+    Text(String),
+    Bold(String),
+    Italic(String),
+    Code(String),
+    Link { label: String, target: String },
+}
+
+/// Parse inline formatting markers (`**bold**`, `*italic*`, `` `code` ``, `[label](url)`)
+/// from a plain string into a list of styled spans.
+///
+/// Markers must be properly paired. Unmatched delimiters render as literal text.
+/// Backtick spans take priority over other markers within their bounds.
+pub fn parse_inline_markup(text: &str) -> Vec<InlineSpan> {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut spans: Vec<InlineSpan> = Vec::new();
+    let mut i = 0;
+
+    while i < len {
+        // Code span: `...` — highest priority
+        if bytes[i] == b'`' {
+            if let Some(end) = text[i + 1..].find('`') {
+                let code = &text[i + 1..i + 1 + end];
+                spans.push(InlineSpan::Code(code.to_string()));
+                i += end + 2;
+                continue;
+            }
+            // Unmatched backtick — push as literal
+            spans.push(InlineSpan::Text("`".to_string()));
+            i += 1;
+            continue;
+        }
+
+        // Link: [label](url)
+        if bytes[i] == b'[' {
+            if let Some(close_bracket) = text[i + 1..].find(']') {
+                let after_bracket = i + 1 + close_bracket + 1;
+                if after_bracket < len && bytes[after_bracket] == b'(' {
+                    if let Some(close_paren) = text[after_bracket + 1..].find(')') {
+                        let label = &text[i + 1..i + 1 + close_bracket];
+                        let target = &text[after_bracket + 1..after_bracket + 1 + close_paren];
+                        spans.push(InlineSpan::Link {
+                            label: label.to_string(),
+                            target: target.to_string(),
+                        });
+                        i = after_bracket + 1 + close_paren + 1;
+                        continue;
+                    }
+                }
+            }
+            // Unmatched [ — push as literal
+            spans.push(InlineSpan::Text("[".to_string()));
+            i += 1;
+            continue;
+        }
+
+        // Bold: **text**
+        if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'*' {
+            if let Some(end) = text[i + 2..].find("**") {
+                let content = &text[i + 2..i + 2 + end];
+                if !content.is_empty() {
+                    spans.push(InlineSpan::Bold(content.to_string()));
+                    i += end + 4;
+                    continue;
+                }
+            }
+            // No matching ** or empty content — treat ** as two literal asterisks
+            spans.push(InlineSpan::Text("**".to_string()));
+            i += 2;
+            continue;
+        }
+
+        // Italic: *text*
+        if bytes[i] == b'*' {
+            if let Some(end) = text[i + 1..].find('*') {
+                let content = &text[i + 1..i + 1 + end];
+                if !content.is_empty() && !content.trim().is_empty() {
+                    spans.push(InlineSpan::Italic(content.to_string()));
+                    i += end + 2;
+                    continue;
+                }
+            }
+            // Unmatched * — push as literal
+            spans.push(InlineSpan::Text("*".to_string()));
+            i += 1;
+            continue;
+        }
+
+        // Regular character — accumulate text run
+        let start = i;
+        while i < len && !matches!(bytes[i], b'`' | b'[' | b'*') {
+            i += 1;
+        }
+        if i > start {
+            spans.push(InlineSpan::Text(text[start..i].to_string()));
+        }
+    }
+
+    spans
+}
+
+/// Render a plain-text version of inline markup (strip markers, show links as `label (url)`).
+pub fn inline_to_plain(spans: &[InlineSpan]) -> String {
+    let mut out = String::new();
+    for span in spans {
+        match span {
+            InlineSpan::Text(s) | InlineSpan::Bold(s) | InlineSpan::Italic(s) => out.push_str(s),
+            InlineSpan::Code(s) => out.push_str(s),
+            InlineSpan::Link { label, target } => {
+                out.push_str(label);
+                if !target.is_empty() && target != label {
+                    out.push_str(&format!(" ({target})"));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Convert inline markup spans to ratatui styled spans for TUI rendering.
+fn inline_to_ratatui_spans(spans: &[InlineSpan]) -> Vec<Span<'static>> {
+    let mut result = Vec::new();
+    for span in spans {
+        match span {
+            InlineSpan::Text(s) => result.push(Span::raw(s.clone())),
+            InlineSpan::Bold(s) => {
+                result.push(Span::styled(
+                    s.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+            }
+            InlineSpan::Italic(s) => {
+                result.push(Span::styled(
+                    s.clone(),
+                    Style::default().add_modifier(Modifier::ITALIC),
+                ));
+            }
+            InlineSpan::Code(s) => {
+                result.push(Span::styled(
+                    s.clone(),
+                    Style::default()
+                        .fg(Color::Green)
+                        .bg(Color::DarkGray),
+                ));
+            }
+            InlineSpan::Link { label, target } => {
+                result.push(Span::styled(
+                    label.clone(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::UNDERLINED),
+                ));
+                if !target.is_empty() && target != label {
+                    result.push(Span::raw(format!(" <{target}>")));
+                }
+            }
+        }
+    }
+    result
+}
+
 /// Safely look up a theme, falling back to the first available theme if missing.
 fn get_theme(name: &str) -> syntect::highlighting::Theme {
     THEME_SET.themes.get(name).cloned().unwrap_or_else(|| {
@@ -47,11 +213,11 @@ pub fn render_plain_with_options(document: &Document, options: RenderOptions) ->
             Block::Heading { level, text } => {
                 output.push_str(&"#".repeat(*level as usize));
                 output.push(' ');
-                output.push_str(text);
+                output.push_str(&inline_to_plain(&parse_inline_markup(text)));
                 output.push_str("\n\n");
             }
             Block::Paragraph(text) => {
-                output.push_str(text);
+                output.push_str(&inline_to_plain(&parse_inline_markup(text)));
                 output.push_str("\n\n");
             }
             Block::Link(link) => {
@@ -89,13 +255,13 @@ pub fn render_plain_with_options(document: &Document, options: RenderOptions) ->
             }
             Block::Quote(text) => {
                 for line in text.lines() {
-                    output.push_str(&format!("> {line}\n"));
+                    output.push_str(&format!("> {}\n", inline_to_plain(&parse_inline_markup(line))));
                 }
                 output.push('\n');
             }
             Block::List(items) => {
                 for item in items {
-                    output.push_str(&format!("• {item}\n"));
+                    output.push_str(&format!("• {}\n", inline_to_plain(&parse_inline_markup(item))));
                 }
                 output.push('\n');
             }
@@ -130,15 +296,18 @@ pub fn render_ratatui_text(document: &Document) -> Text<'static> {
     for block in &document.blocks {
         match block {
             Block::Heading { level, text } => {
-                lines.push(Line::from(vec![
+                let spans = inline_to_ratatui_spans(&parse_inline_markup(text));
+                let mut heading = vec![
                     Span::raw("#".repeat(*level as usize)),
                     Span::raw(" "),
-                    Span::raw(text.clone()),
-                ]));
+                ];
+                heading.extend(spans);
+                lines.push(Line::from(heading));
                 lines.push(Line::raw(""));
             }
             Block::Paragraph(text) => {
-                lines.push(Line::raw(text.clone()));
+                let spans = inline_to_ratatui_spans(&parse_inline_markup(text));
+                lines.push(Line::from(spans));
                 lines.push(Line::raw(""));
             }
             Block::Link(link) => {
@@ -175,13 +344,19 @@ pub fn render_ratatui_text(document: &Document) -> Text<'static> {
             }
             Block::Quote(text) => {
                 for line in text.lines() {
-                    lines.push(Line::raw(format!("┃ {line}")));
+                    let spans = inline_to_ratatui_spans(&parse_inline_markup(line));
+                    let mut qline = vec![Span::raw("┃ ")];
+                    qline.extend(spans);
+                    lines.push(Line::from(qline));
                 }
                 lines.push(Line::raw(""));
             }
             Block::List(items) => {
                 for item in items {
-                    lines.push(Line::raw(format!("  • {item}")));
+                    let spans = inline_to_ratatui_spans(&parse_inline_markup(item));
+                    let mut iline = vec![Span::raw("  • ")];
+                    iline.extend(spans);
+                    lines.push(Line::from(iline));
                 }
                 lines.push(Line::raw(""));
             }
@@ -343,13 +518,113 @@ fn render_table_separator(widths: &[usize]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use jaringan_core::parse_document;
-
     use super::*;
+
+    // ── Inline markup parsing tests ─────────────────────────────────────
+
+    #[test]
+    fn test_parse_inline_markup_plain_text() {
+        let spans = parse_inline_markup("hello world");
+        assert_eq!(spans, vec![InlineSpan::Text("hello world".to_string())]);
+    }
+
+    #[test]
+    fn test_parse_inline_markup_bold() {
+        let spans = parse_inline_markup("**bold**");
+        assert_eq!(spans, vec![InlineSpan::Bold("bold".to_string())]);
+    }
+
+    #[test]
+    fn test_parse_inline_markup_italic() {
+        let spans = parse_inline_markup("*italic*");
+        assert_eq!(spans, vec![InlineSpan::Italic("italic".to_string())]);
+    }
+
+    #[test]
+    fn test_parse_inline_markup_code() {
+        let spans = parse_inline_markup("`code`");
+        assert_eq!(spans, vec![InlineSpan::Code("code".to_string())]);
+    }
+
+    #[test]
+    fn test_parse_inline_markup_link() {
+        let spans = parse_inline_markup("[label](url)");
+        assert_eq!(
+            spans,
+            vec![InlineSpan::Link {
+                label: "label".to_string(),
+                target: "url".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_inline_markup_mixed() {
+        let spans = parse_inline_markup("**bold** and *italic* and `code`");
+        assert_eq!(spans.len(), 5);
+        assert_eq!(spans[0], InlineSpan::Bold("bold".to_string()));
+        assert_eq!(spans[1], InlineSpan::Text(" and ".to_string()));
+        assert_eq!(spans[2], InlineSpan::Italic("italic".to_string()));
+        assert_eq!(spans[3], InlineSpan::Text(" and ".to_string()));
+        assert_eq!(spans[4], InlineSpan::Code("code".to_string()));
+    }
+
+    #[test]
+    fn test_parse_inline_markup_link_in_text() {
+        let spans = parse_inline_markup("visit [example](https://example.com) now");
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0], InlineSpan::Text("visit ".to_string()));
+        assert_eq!(
+            spans[1],
+            InlineSpan::Link {
+                label: "example".to_string(),
+                target: "https://example.com".to_string(),
+            }
+        );
+        assert_eq!(spans[2], InlineSpan::Text(" now".to_string()));
+    }
+
+    #[test]
+    fn test_inline_to_plain_strips_markers() {
+        let spans = parse_inline_markup("**bold** and *italic* and `code`");
+        let plain = inline_to_plain(&spans);
+        assert_eq!(plain, "bold and italic and code");
+    }
+
+    #[test]
+    fn test_inline_to_plain_shows_link_url() {
+        let spans = parse_inline_markup("try [Jaringan](https://jaringan.dev)");
+        let plain = inline_to_plain(&spans);
+        assert_eq!(plain, "try Jaringan (https://jaringan.dev)");
+    }
+
+    #[test]
+    fn test_unmatched_markers_render_as_literal() {
+        let spans = parse_inline_markup("*unmatched");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0], InlineSpan::Text("*".to_string()));
+        assert_eq!(spans[1], InlineSpan::Text("unmatched".to_string()));
+
+        let spans = parse_inline_markup("**partial");
+        assert_eq!(spans, vec![InlineSpan::Text("**".to_string()), InlineSpan::Text("partial".to_string())]);
+    }
+
+    #[test]
+    fn test_empty_bold_does_not_parse() {
+        let spans = parse_inline_markup("****");
+        assert!(spans.iter().all(|s| matches!(s, InlineSpan::Text(_))));
+    }
+
+    #[test]
+    fn test_parse_inline_markup_empty() {
+        assert!(parse_inline_markup("").is_empty());
+    }
+
+    // ── Legacy plain render tests ───────────────────────────────────────
 
     #[test]
     fn renders_plain_text_with_numbered_links() {
-        let doc = parse_document("# Hello\n\nWelcome.\n\n=> jrg://example/about About\n").unwrap();
+        let doc = jaringan_core::parse_document("# Hello\n\nWelcome.\n\n=> jrg://example/about About\n").unwrap();
         let rendered = render_plain(&doc);
 
         assert!(rendered.contains("# Hello"));
@@ -359,7 +634,7 @@ mod tests {
 
     #[test]
     fn renders_ratatui_text() {
-        let doc = parse_document("# Hello\n\n=> jrg://example/about About\n").unwrap();
+        let doc = jaringan_core::parse_document("# Hello\n\n=> jrg://example/about About\n").unwrap();
         let text = render_ratatui_text(&doc);
 
         assert!(text.lines.len() >= 3);
@@ -367,7 +642,7 @@ mod tests {
 
     #[test]
     fn renders_buttons_and_images_as_terminal_native_controls() {
-        let doc = parse_document(
+        let doc = jaringan_core::parse_document(
             "# Rich\n\n! save label=\"Save\" target=\"save\"\n@ ./cover.png alt=\"Cover\"\n",
         )
         .unwrap();
@@ -379,7 +654,7 @@ mod tests {
 
     #[test]
     fn renders_tables_quotes_lists_and_rules() {
-        let doc = parse_document(
+        let doc = jaringan_core::parse_document(
             "# Layout\n\n> Polished terminal pages.\n\n- Tables\n- Quotes\n\n---\n\n| Name | Role |\n| --- | --- |\n| Simon | Builder |\n",
         )
         .unwrap();
@@ -392,10 +667,9 @@ mod tests {
         assert!(rendered.contains("| Simon | Builder |"));
 
         let tui = render_ratatui_text(&doc);
-        assert!(
-            tui.lines
-                .iter()
-                .any(|line| line.spans.iter().any(|span| span.content.contains("Name")))
-        );
+        assert!(tui
+            .lines
+            .iter()
+            .any(|line| line.spans.iter().any(|span| span.content.contains("Name"))));
     }
 }
