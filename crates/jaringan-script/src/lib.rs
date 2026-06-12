@@ -336,6 +336,41 @@ impl WasmRuntime {
             },
         )?;
 
+        // (import "jaringan" "resolve" (func (param i32 i32) (result i32)))
+        linker.func_wrap(
+            "jaringan",
+            "resolve",
+            |mut caller: Caller<'_, BridgeState>, url_ptr: i32, url_len: i32| -> i32 {
+                let mem = caller
+                    .get_export("memory")
+                    .and_then(|e| e.into_memory())
+                    .expect("memory export required for jaringan.resolve");
+
+                let url = {
+                    let ctx = caller.as_context();
+                    read_string(&mem, &ctx, url_ptr, url_len)
+                };
+
+                let state = caller.data();
+                match state.resolve_fn {
+                    Some(ref resolve) => match resolve(&url) {
+                        Ok(result_json) => {
+                            let mut ctx = caller.as_context_mut();
+                            write_json(&mem, &mut ctx, &result_json)
+                        }
+                        Err(e) => {
+                            let mut ctx = caller.as_context_mut();
+                            write_error(&mem, &mut ctx, &e)
+                        }
+                    },
+                    None => {
+                        let mut ctx = caller.as_context_mut();
+                        write_json(&mem, &mut ctx, &serde_json::json!({"error": "resolve not available"}).to_string())
+                    }
+                }
+            },
+        )?;
+
         // ── Instantiate ──────────────────────────────────────────────────────
         let instance = linker.instantiate(&mut store, &module)?;
 
@@ -659,6 +694,7 @@ mod tests {
                 assert_eq!(msg, "Hello from WASM");
             })),
             store: None,
+            resolve_fn: None,
         };
 
         let input = ScriptInput {

@@ -816,6 +816,7 @@ fn run_app(
             eprintln!("[jaringan:bridge/{level}] {msg}");
         })),
         store: None,
+        resolve_fn: None,
     });
 
     // Initialize plugin registry from ~/.config/jaringan/plugins/

@@ -9,6 +9,7 @@ pub struct BridgeState {
     pub navigate_fn: Option<Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>>,
     pub log_fn: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
     pub store: Option<HashMap<String, String>>,
+    pub resolve_fn: Option<Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>>,
 }
 
 impl BridgeState {
@@ -19,6 +20,7 @@ impl BridgeState {
             navigate_fn: None,
             log_fn: None,
             store: None,
+            resolve_fn: None,
         }
     }
 }
