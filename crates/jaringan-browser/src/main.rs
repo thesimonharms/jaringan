@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     env, fs,
-    io::{self, Stdout},
+    io::{self, BufRead, Stdout},
     net::TcpListener,
     path::{Path, PathBuf},
     sync::{mpsc, Arc, Mutex},
@@ -88,6 +88,11 @@ enum Command {
         url: String,
         /// The button id or label to click.
         button: String,
+    },
+    /// Start an interactive session, reading commands from stdin.
+    Session {
+        /// The jrg:// URL to start the session at.
+        url: String,
     },
     /// Execute a WASM script from a jrg:// page and print the output as JSON.
     Run {
@@ -517,6 +522,87 @@ fn main() -> anyhow::Result<()> {
 
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
+        Command::Session { url } => {
+            let mut session = jaringan_browser::session::SessionState::start(&url)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            // Print initial state as JSON
+            let initial = serde_json::json!({
+                "url": url,
+                "status": "session_started",
+                "blocks": session.document().blocks.iter().map(|b| block_summary_json(b)).collect::<Vec<_>>(),
+            });
+            println!("{}", serde_json::to_string_pretty(&initial)?);
+
+            // Read commands from stdin
+            let stdin = io::stdin();
+            for line in stdin.lock().lines() {
+                let line = line?;
+                let line = line.trim().to_string();
+                if line.is_empty() || line == "exit" || line == "quit" {
+                    break;
+                }
+
+                // Parse command: "inspect", "fill name=value", "refresh"
+                let response = match line.split_once(' ') {
+                    Some(("fill", rest)) => {
+                        // Fill inputs
+                        let mut updated = session.blocks.clone();
+                        if let Some((name, value)) = rest.split_once('=') {
+                            for block in &mut updated {
+                                if let Block::Input(input) = block {
+                                    if input.name == name.trim() {
+                                        input.value = value.trim().to_string();
+                                    }
+                                }
+                            }
+                        }
+                        session.blocks = updated;
+                        serde_json::json!({"status": "filled", "blocks": session.document().blocks.iter().map(|b| block_summary_json(b)).collect::<Vec<_>>()})
+                    }
+                    Some(("navigate", target)) => {
+                        // Navigate to a new URL (relative or absolute)
+                        let new_url = if target.starts_with("jrg://") {
+                            target.to_string()
+                        } else {
+                            // relative — just join
+                            let base = url.trim_end_matches('/');
+                            format!("{}/{}", base, target.trim_start_matches('/'))
+                        };
+                        match jaringan_browser::session::SessionState::start(&new_url) {
+                            Ok(new_session) => {
+                                session = new_session;
+                                serde_json::json!({"status": "navigated", "url": session.url, "blocks": session.document().blocks.iter().map(|b| block_summary_json(b)).collect::<Vec<_>>()})
+                            }
+                            Err(e) => serde_json::json!({"status": "error", "error": e}),
+                        }
+                    }
+                    _ if line == "refresh" => {
+                        match session.refresh() {
+                            Ok(()) => serde_json::json!({"status": "refreshed", "blocks": session.document().blocks.iter().map(|b| block_summary_json(b)).collect::<Vec<_>>()}),
+                            Err(e) => serde_json::json!({"status": "error", "error": e}),
+                        }
+                    }
+                    _ if line == "inspect" => {
+                        let doc = session.document();
+                        serde_json::json!({
+                            "inputs": doc.blocks.iter().filter_map(|b| {
+                                if let Block::Input(i) = b { Some(serde_json::json!({"name": i.name, "label": i.label, "value": i.value, "placeholder": i.placeholder})) } else { None }
+                            }).collect::<Vec<_>>(),
+                            "buttons": doc.blocks.iter().filter_map(|b| {
+                                if let Block::Button(b2) = b { Some(serde_json::json!({"id": b2.id, "label": b2.label, "method": b2.method.as_str(), "target": b2.target})) } else { None }
+                            }).collect::<Vec<_>>(),
+                            "scripts": doc.blocks.iter().filter_map(|b| {
+                                if let Block::Script { label, .. } = b { Some(serde_json::json!({"label": label})) } else { None }
+                            }).collect::<Vec<_>>(),
+                        })
+                    }
+                    _ => serde_json::json!({"status": "error", "error": format!("unknown command: {}", line)}),
+                };
+
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+        }
         Command::Run { url, script } => {
             let parsed = JaringanUrl::parse(&url)?;
             let response = fetch_tcp(&parsed)
@@ -906,6 +992,35 @@ fn parse_32_byte_hex_key(input: &str) -> anyhow::Result<[u8; 32]> {
             .with_context(|| format!("invalid hex byte `{hex}` in JARINGAN_ENCRYPTION_KEY_HEX"))?;
     }
     Ok(bytes)
+}
+
+/// Produce a JSON summary of a single block for the session subcommand output.
+fn block_summary_json(block: &Block) -> serde_json::Value {
+    let type_name = match block {
+        Block::Heading { .. } => "heading",
+        Block::Paragraph(_) => "paragraph",
+        Block::Link(_) => "link",
+        Block::Input(_) => "input",
+        Block::Button(_) => "button",
+        Block::Image(_) => "image",
+        Block::Quote(_) => "quote",
+        Block::List(_) => "list",
+        Block::Rule => "rule",
+        Block::Table(_) => "table",
+        Block::Preformatted { .. } => "preformatted",
+        Block::Script { .. } => "script",
+    };
+    let text = match block {
+        Block::Paragraph(s) => Some(s.clone()),
+        Block::Quote(s) => Some(s.clone()),
+        Block::Heading { text, .. } => Some(text.clone()),
+        Block::Preformatted { code, .. } => Some(code.clone()),
+        _ => None,
+    };
+    serde_json::json!({
+        "type": type_name,
+        "text": text,
+    })
 }
 
 fn run_tui(target: Option<String>) -> anyhow::Result<()> {
