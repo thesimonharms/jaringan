@@ -4,10 +4,18 @@ Welcome to the Jaringan documentation! Jaringan is a terminal-native browser and
 
 => getting-started/index.jrg Getting Started
 => guide/index.jrg User Guide
-=> reference/index.jrg Reference
+=> reference/index.jrg CLI & Protocol Reference
+=> spec/jrg-protocol.jrg JRG Protocol Specification
+=> spec/jrg-page-format.jrg JRG Page Format Specification
+=> spec/jrg-encryption.jrg JRG Encryption Specification
+=> spec/jrg-security.jrg JRG Security Specification
+=> spec/jrg-search.jrg JRG Search Specification
 
 ## Quick Links
 
+=> architecture.md Architecture Overview
+=> m1-file-browser.md M1 File Browser Reference
+=> plugin-abi.jrg Plugin ABI
 => ../README.md Project README
 => https://github.com/thesimonharms/jaringan GitHub Repository
 

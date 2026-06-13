@@ -125,7 +125,7 @@ impl HttpToJrgGateway {
         };
 
         let router = Router::new()
-            .route("/", get(root_handler))
+            .route("/__gateway", get(root_handler))
             .route("/health", get(health_handler))
             .fallback(get(catch_all_handler).post(catch_all_handler))
             .layer(middleware::from_fn(cors_middleware));
@@ -198,6 +198,11 @@ async fn root_handler(State(state): State<AppState>) -> Html<String> {
         <li><a href="/proxy/jrg://{jrg_host}/">/proxy/jrg://{jrg_host}/</a> — explicit proxy to any JRG URL</li>
         <li><a href="/">/path/to/page.jrg</a> — implicit proxy to configured host</li>
     </ul>
+    <hr>
+    <p style="color: #666; font-size: 0.85rem;">
+        Built with <a href="https://github.com/thesimonharms/jaringan" style="color: #333;">Jaringan</a>
+        — the terminal-native, AI-friendly web protocol.
+    </p>
 </body>
 </html>"#,
         jrg_host = config.jrg_host,

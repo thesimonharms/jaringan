@@ -207,6 +207,13 @@ pub enum ResponseTag {
     /// Content-Type of the original HTTP response.
     /// Format: `Tag-ContentType: <mime-type>`
     ContentType { value: String },
+    /// An authentication/authorization token for a named service.
+    /// Format: `Tag-Token: service=<s> value=<v> expires_at=<e>`
+    Token {
+        service: String,
+        value: String,
+        expires_at: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -899,6 +906,27 @@ fn read_response_header(reader: &mut BufReader<TcpStream>) -> Result<Response, W
             tags.push(ResponseTag::ContentType {
                 value: value.trim().to_owned(),
             });
+        } else if let Some(value) = line.strip_prefix("Tag-Token:") {
+            let value = value.trim();
+            let mut service = None;
+            let mut token_value = None;
+            let mut expires_at = None;
+            for part in value.split_whitespace() {
+                if let Some(s) = part.strip_prefix("service=") {
+                    service = Some(s.to_owned());
+                } else if let Some(v) = part.strip_prefix("value=") {
+                    token_value = Some(v.to_owned());
+                } else if let Some(e) = part.strip_prefix("expires_at=") {
+                    expires_at = Some(e.to_owned());
+                }
+            }
+            if let (Some(service), Some(token_value)) = (service, token_value) {
+                tags.push(ResponseTag::Token {
+                    service,
+                    value: token_value,
+                    expires_at: expires_at.filter(|e| !e.is_empty()),
+                });
+            }
         }
     }
 
@@ -1096,6 +1124,17 @@ pub fn write_response(writer: &mut impl Write, response: &Response) -> io::Resul
             ResponseTag::ContentType { value } => {
                 writeln!(writer, "Tag-ContentType: {value}")?
             }
+            ResponseTag::Token {
+                service,
+                value,
+                expires_at,
+            } => {
+                write!(writer, "Tag-Token: service={service} value={value}")?;
+                if let Some(expires_at) = expires_at {
+                    write!(writer, " expires_at={expires_at}")?;
+                }
+                writeln!(writer)?;
+            }
         }
     }
     writeln!(writer)?;
@@ -1268,6 +1307,27 @@ pub fn read_response(reader: &mut impl Read) -> Result<Response, WireError> {
             tags.push(ResponseTag::ContentType {
                 value: value.trim().to_owned(),
             });
+        } else if let Some(value) = line.strip_prefix("Tag-Token:") {
+            let value = value.trim();
+            let mut service = None;
+            let mut token_value = None;
+            let mut expires_at = None;
+            for part in value.split_whitespace() {
+                if let Some(s) = part.strip_prefix("service=") {
+                    service = Some(s.to_owned());
+                } else if let Some(v) = part.strip_prefix("value=") {
+                    token_value = Some(v.to_owned());
+                } else if let Some(e) = part.strip_prefix("expires_at=") {
+                    expires_at = Some(e.to_owned());
+                }
+            }
+            if let (Some(service), Some(token_value)) = (service, token_value) {
+                tags.push(ResponseTag::Token {
+                    service,
+                    value: token_value,
+                    expires_at: expires_at.filter(|e| !e.is_empty()),
+                });
+            }
         }
     }
 

@@ -71,7 +71,7 @@ Examples:
 ### Buttons / actions
 
 ```text
-! id label="Button label" method="POST" target="action-or-target" confirm="Run this action?" auth="capability-token"
+! id label="Button label" method="POST" target="action-or-target" confirm="Run this action?" auth="myservice"
 ```
 
 - Buttons are terminal-native controls and may represent side-effectful actions.
@@ -80,7 +80,7 @@ Examples:
 - `target` is optional and defaults to `id`.
 - `method` is optional and defaults to `GET`; supported values are `GET` and `POST`.
 - `confirm` is optional explicit confirmation copy.
-- `auth` is an optional action capability token. When present, the browser includes it in the action request so the resolver can authorize the side effect.
+- `auth` is an optional **service name** used to look up a stored capability token. When present, the browser searches `~/.config/jaringan/tokens/<service>/token` (with prefix matching — e.g. `auth="microblog"` matches a token stored under `microblog.localhost:7072`) and sends the found token as `Action-Token` on the wire. The token is issued by a server-side registration or login action that returns a `Tag-Token` response header.
 - When `confirm` is present, the prototype browser requires pressing Enter twice: first to stage the action and display the confirmation prompt, then again to confirm it.
 - Confirmed `GET` actions are surfaced in browser status text with the collected form payload appended as query parameters.
 - Confirmed `POST` actions collect all current input values into a URL-encoded payload.

@@ -282,6 +282,16 @@ pub fn render_plain_with_options(document: &Document, options: RenderOptions) ->
                     output.push_str(&format!("⚡ [{label}]\n\n"));
                 }
             }
+            Block::Auth { service, scope, ttl } => {
+                output.push_str(&format!("[auth] {}", service));
+                if let Some(scope) = scope {
+                    output.push_str(&format!(" scope=\"{}\"", scope));
+                }
+                if let Some(ttl) = ttl {
+                    output.push_str(&format!(" ttl=\"{}\"", ttl));
+                }
+                output.push_str("\n\n");
+            }
         }
     }
 
@@ -387,6 +397,17 @@ pub fn render_ratatui_text(document: &Document) -> Text<'static> {
                     lines.push(Line::raw(format!("⚡ [{label}]")));
                     lines.push(Line::raw(""));
                 }
+            }
+            Block::Auth { service, scope, ttl } => {
+                let mut text = format!("[auth] {}", service);
+                if let Some(scope) = scope {
+                    text.push_str(&format!(" scope=\"{}\"", scope));
+                }
+                if let Some(ttl) = ttl {
+                    text.push_str(&format!(" ttl=\"{}\"", ttl));
+                }
+                lines.push(Line::raw(text));
+                lines.push(Line::raw(""));
             }
         }
     }
@@ -518,6 +539,218 @@ fn render_table_separator(widths: &[usize]) -> String {
         .collect::<Vec<_>>()
         .join("┼");
     format!("├{cells}┤")
+}
+
+// ── HTML rendering ─────────────────────────────────────────────────────
+
+/// HTML-escape a string (replace &, <, >, ", ').
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Convert inline markup spans to HTML with proper tags.
+fn inline_to_html(spans: &[InlineSpan]) -> String {
+    let mut out = String::new();
+    for span in spans {
+        match span {
+            InlineSpan::Text(s) => out.push_str(&html_escape(s)),
+            InlineSpan::Bold(s) => {
+                out.push_str("<strong>");
+                out.push_str(&html_escape(s));
+                out.push_str("</strong>");
+            }
+            InlineSpan::Italic(s) => {
+                out.push_str("<em>");
+                out.push_str(&html_escape(s));
+                out.push_str("</em>");
+            }
+            InlineSpan::Code(s) => {
+                out.push_str("<code>");
+                out.push_str(&html_escape(s));
+                out.push_str("</code>");
+            }
+            InlineSpan::Link { label, target } => {
+                out.push_str("<a href=\"");
+                out.push_str(&html_escape(target));
+                out.push_str("\">");
+                out.push_str(&html_escape(label));
+                out.push_str("</a>");
+            }
+        }
+    }
+    out
+}
+
+/// Render a table as semantic HTML with alignment support.
+fn render_table_html(table: &Table) -> String {
+    let mut out = String::new();
+    out.push_str("<table class=\"jrg-table\">\n");
+
+    if !table.headers.is_empty() {
+        out.push_str("<thead>\n<tr>\n");
+        for (i, header) in table.headers.iter().enumerate() {
+            let align = table.alignments.get(i).copied().unwrap_or(Alignment::None);
+            let style = match align {
+                Alignment::None | Alignment::Left => "",
+                Alignment::Center => " style=\"text-align: center\"",
+                Alignment::Right => " style=\"text-align: right\"",
+            };
+            out.push_str(&format!("<th{}>{}</th>\n", style, html_escape(header)));
+        }
+        out.push_str("</tr>\n</thead>\n");
+    }
+
+    out.push_str("<tbody>\n");
+    for row in &table.rows {
+        out.push_str("<tr>\n");
+        for (i, cell) in row.iter().enumerate() {
+            let align = table.alignments.get(i).copied().unwrap_or(Alignment::None);
+            let style = match align {
+                Alignment::None | Alignment::Left => "",
+                Alignment::Center => " style=\"text-align: center\"",
+                Alignment::Right => " style=\"text-align: right\"",
+            };
+            out.push_str(&format!("<td{}>{}</td>\n", style, html_escape(cell)));
+        }
+        out.push_str("</tr>\n");
+    }
+    out.push_str("</tbody>\n");
+    out.push_str("</table>\n");
+    out
+}
+
+/// Render a JRG document as semantic HTML.
+///
+/// Returns only the inner HTML body content (no `<html>`, `<head>`, or `<body>` wrapper).
+/// Each block is converted to its appropriate semantic HTML element with inline markup
+/// applied. Code blocks use syntect for syntax highlighting with the base16-ocean.dark theme.
+pub fn render_html(document: &Document) -> String {
+    let mut output = String::new();
+    let mut link_index = 1usize;
+
+    for block in &document.blocks {
+        match block {
+            Block::Heading { level, text } => {
+                let level = level.clamp(&1, &6);
+                let spans = parse_inline_markup(text);
+                output.push_str(&format!(
+                    "<h{level}>{}</h{level}>\n",
+                    inline_to_html(&spans)
+                ));
+            }
+            Block::Paragraph(text) => {
+                let spans = parse_inline_markup(text);
+                output.push_str(&format!("<p>{}</p>\n", inline_to_html(&spans)));
+            }
+            Block::Link(link) => {
+                output.push_str(&format!(
+                    r#"<a href="{}" class="jrg-link">[{}] {}</a>"#,
+                    html_escape(&link.target),
+                    link_index,
+                    html_escape(&link.label),
+                ));
+                output.push('\n');
+                link_index += 1;
+            }
+            Block::Input(input) => {
+                let placeholder = input.placeholder.as_deref().unwrap_or("");
+                output.push_str(&format!(
+                    r#"<div class="jrg-input"><label>{}</label><input name="{}" value="{}" placeholder="{}"></div>"#,
+                    html_escape(&input.label),
+                    html_escape(&input.name),
+                    html_escape(&input.value),
+                    html_escape(placeholder),
+                ));
+                output.push('\n');
+            }
+            Block::Button(button) => {
+                output.push_str(&format!(
+                    r#"<button class="jrg-btn" data-id="{}" data-target="{}" data-method="{}">{}</button>"#,
+                    html_escape(&button.id),
+                    html_escape(&button.target),
+                    button.method.as_str(),
+                    html_escape(&button.label),
+                ));
+                output.push('\n');
+            }
+            Block::Image(image) => {
+                output.push_str(&format!(
+                    r#"<img src="{}" alt="{}" loading="lazy">"#,
+                    html_escape(&image.source),
+                    html_escape(&image.alt),
+                ));
+                output.push('\n');
+            }
+            Block::Quote(text) => {
+                output.push_str("<blockquote>\n");
+                for line in text.lines() {
+                    let spans = parse_inline_markup(line);
+                    output.push_str(&format!("<p>{}</p>\n", inline_to_html(&spans)));
+                }
+                output.push_str("</blockquote>\n");
+            }
+            Block::List(items) => {
+                output.push_str("<ul>\n");
+                for item in items {
+                    let spans = parse_inline_markup(item);
+                    output.push_str(&format!("<li>{}</li>\n", inline_to_html(&spans)));
+                }
+                output.push_str("</ul>\n");
+            }
+            Block::Rule => {
+                output.push_str("<hr>\n");
+            }
+            Block::Table(table) => {
+                output.push_str(&render_table_html(table));
+            }
+            Block::Preformatted { code, language } => {
+                if let Some(lang) = language {
+                    if let Some(syntax) = SYNTAX_SET.find_syntax_by_token(lang) {
+                        let theme = get_theme("base16-ocean.dark");
+                        if let Ok(highlighted) = syntect::html::highlighted_html_for_string(
+                            code,
+                            &SYNTAX_SET,
+                            syntax,
+                            &theme,
+                        ) {
+                            output.push_str(&highlighted);
+                            output.push('\n');
+                            continue;
+                        }
+                    }
+                }
+                // Fallback: plain escaped code block
+                let lang_class = language.as_deref().unwrap_or("");
+                output.push_str(&format!(
+                    r#"<pre><code class="language-{}">{}</code></pre>"#,
+                    html_escape(lang_class),
+                    html_escape(code),
+                ));
+                output.push('\n');
+            }
+            Block::Script { label, .. } => {
+                if let Some(label) = label {
+                    output.push_str(&format!("<!-- JRG Script: {} -->\n", html_escape(label)));
+                }
+            }
+            Block::Auth { service, scope, ttl } => {
+                let mut attrs = format!("data-service=\"{}\"", html_escape(service));
+                if let Some(scope) = scope {
+                    attrs.push_str(&format!(" data-scope=\"{}\"", html_escape(scope)));
+                }
+                if let Some(ttl) = ttl {
+                    attrs.push_str(&format!(" data-ttl=\"{}\"", html_escape(ttl)));
+                }
+                output.push_str(&format!("<div class=\"jrg-auth\" {}></div>\n", attrs));
+            }
+        }
+    }
+
+    output.trim_end().to_owned()
 }
 
 #[cfg(test)]

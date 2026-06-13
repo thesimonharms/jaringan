@@ -158,6 +158,11 @@ enum Command {
         #[command(subcommand)]
         command: GatewayCommand,
     },
+    /// Manage authentication tokens for Jaringan services
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     /// List installed WASM plugins
     Plugins {
         /// Path to plugins directory (default: ~/.config/jaringan/plugins/)
@@ -197,6 +202,30 @@ enum GatewayCommand {
         /// Maximum response body size in bytes
         #[arg(long, default_value_t = 1_048_576)]
         max_response_size: usize,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthCommand {
+    /// Register or log in to a service via its register.jrg page
+    Register {
+        /// Service URL (e.g., api.site.tld or https://api.site.tld)
+        service: String,
+        /// Form field name=value pairs for headless registration
+        #[arg(long, short)]
+        field: Vec<String>,
+    },
+    /// Log in to a service (interactive or with existing credentials)
+    Login {
+        /// Service URL
+        service: String,
+    },
+    /// List all stored tokens
+    List,
+    /// Remove a stored token
+    Revoke {
+        /// Service to revoke token for
+        service: String,
     },
 }
 
@@ -336,6 +365,7 @@ fn main() -> anyhow::Result<()> {
                     Block::Table(_) => "table",
                     Block::Preformatted { .. } => "preformatted",
                     Block::Script { .. } => "script",
+                    Block::Auth { .. } => "auth",
                 };
                 let text = match b {
                     Block::Paragraph(s) => Some(s.clone()),
@@ -390,6 +420,7 @@ fn main() -> anyhow::Result<()> {
                     Block::Table(_) => "table",
                     Block::Preformatted { .. } => "preformatted",
                     Block::Script { .. } => "script",
+                    Block::Auth { .. } => "auth",
                 };
                 let text = match b {
                     Block::Paragraph(s) => Some(s.clone()),
@@ -473,8 +504,13 @@ fn main() -> anyhow::Result<()> {
                     // Construct POST body — include button id as minimal payload
                     let body = format!("button={}", found.id);
                     if let Some(ref auth) = found.auth {
-                        post_tcp_with_action_token(&target_url, body, auth)
-                            .with_context(|| format!("failed to POST button action to {}", target_url))?
+                        // Look up stored token by service name; button works without one
+                        match lookup_stored_token(auth) {
+                            Some(token) => post_tcp_with_action_token(&target_url, body, &token)
+                                .with_context(|| format!("failed to POST button action to {}", target_url))?,
+                            None => post_tcp(&target_url, body)
+                                .with_context(|| format!("failed to POST button action to {}", target_url))?,
+                        }
                     } else {
                         post_tcp(&target_url, body)
                             .with_context(|| format!("failed to POST button action to {}", target_url))?
@@ -499,6 +535,7 @@ fn main() -> anyhow::Result<()> {
                     Block::Table(_) => "table",
                     Block::Preformatted { .. } => "preformatted",
                     Block::Script { .. } => "script",
+                    Block::Auth { .. } => "auth",
                 };
                 let text = match b {
                     Block::Paragraph(s) => Some(s.clone()),
@@ -854,6 +891,393 @@ fn main() -> anyhow::Result<()> {
                 serve(listener, resolver)?;
             }
         },
+        Command::Auth { command } => match command {
+            AuthCommand::List => auth_list()?,
+            AuthCommand::Revoke { service } => auth_revoke(&service)?,
+            AuthCommand::Register { service, field } => {
+                auth_register_or_login(&service, "register.jrg", &field)?
+            }
+            AuthCommand::Login { service } => {
+                auth_register_or_login(&service, "login.jrg", &[])?
+            }
+        },
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Auth helpers — token storage and register/login via HTTP
+// ---------------------------------------------------------------------------
+
+/// Get the tokens storage directory (~/.config/jaringan/tokens/).
+fn tokens_dir() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".config/jaringan/tokens")
+}
+
+/// Store a token for a service on disk.
+fn store_token(
+    service: &str,
+    token: &str,
+    scope: Option<&str>,
+    expires_at: Option<&str>,
+) -> io::Result<()> {
+    let dir = tokens_dir().join(service);
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("token"), token)?;
+    if let Some(s) = scope {
+        fs::write(dir.join("scope"), s)?;
+    }
+    if let Some(e) = expires_at {
+        fs::write(dir.join("expires_at"), e)?;
+    }
+    Ok(())
+}
+
+/// List all stored tokens.
+fn auth_list() -> anyhow::Result<()> {
+    let dir = tokens_dir();
+    if !dir.exists() {
+        println!("No tokens stored.");
+        return Ok(());
+    }
+    let mut entries: Vec<_> = fs::read_dir(&dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in &entries {
+        let service = entry.file_name().to_string_lossy().to_string();
+        let token_path = entry.path().join("token");
+        let scope_path = entry.path().join("scope");
+        let expires_path = entry.path().join("expires_at");
+        let token = fs::read_to_string(&token_path).unwrap_or_default();
+        let scope = fs::read_to_string(&scope_path).unwrap_or_default();
+        let expires = fs::read_to_string(&expires_path).unwrap_or_default();
+        println!(
+            "  {} ({} chars, scope: {}, expires: {})",
+            service,
+            token.len(),
+            scope.trim(),
+            expires.trim()
+        );
+    }
+    Ok(())
+}
+
+/// Look up a stored token by service name using prefix matching.
+/// E.g., auth_service="microblog" matches stored dir "microblog.localhost:7072".
+fn lookup_stored_token(auth_service: &str) -> Option<String> {
+    let dir = tokens_dir();
+    if !dir.exists() {
+        return None;
+    }
+    // First try exact match
+    let exact = dir.join(auth_service);
+    if exact.join("token").exists() {
+        return fs::read_to_string(exact.join("token")).ok();
+    }
+    // Then try prefix match: dir name starts with "auth_service." or "auth_service:"
+    let prefix1 = format!("{}.", auth_service);
+    let prefix2 = format!("{}:", auth_service);
+    for entry in fs::read_dir(&dir).ok()? {
+        let entry = entry.ok()?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == auth_service || name.starts_with(&prefix1) || name.starts_with(&prefix2) {
+            let token_path = entry.path().join("token");
+            if token_path.exists() {
+                return fs::read_to_string(token_path).ok();
+            }
+        }
+    }
+    None
+}
+
+/// Revoke (remove) a stored token for a service.
+fn auth_revoke(service: &str) -> anyhow::Result<()> {
+    let token_dir = tokens_dir().join(service);
+    if token_dir.exists() {
+        fs::remove_dir_all(&token_dir)?;
+        println!("Token for '{}' revoked.", service);
+    } else {
+        println!("No token stored for '{}'.", service);
+    }
+    Ok(())
+}
+
+/// Register or log in to a service by fetching its register.jrg or login.jrg
+/// page over the JRG TCP protocol, optionally filling form fields and submitting.
+fn auth_register_or_login(
+    service: &str,
+    page: &str,
+    fields: &[String],
+) -> anyhow::Result<()> {
+    // Determine if this looks like a JRG host:port or needs HTTP fallback
+    let use_http = service.starts_with("http://") || service.starts_with("https://");
+
+    if !use_http {
+        // ——— JRG TCP path ———
+        // Parse host and optional port from the service string
+        let parts: Vec<&str> = service.split(':').collect();
+        let host = if parts[0] == "localhost" { "127.0.0.1" } else { parts[0] };
+        let port: u16 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(7070);
+
+        let page_url_str = format!("jrg://{host}:{port}/{page}");
+        let page_url = JaringanUrl::parse(&page_url_str)
+            .with_context(|| format!("invalid JRG URL: {page_url_str}"))?;
+
+        // Fetch the register/login page
+        let resp = fetch_tcp(&page_url)
+            .with_context(|| format!("failed to fetch {page_url_str} — is the service running on JRG TCP port {port}?"))?;
+
+        if resp.status != StatusCode::Ok {
+            bail!("JRG {} when fetching {page_url_str}", resp.status.as_u16());
+        }
+
+        // Parse as JRG document to extract form inputs
+        let doc = parse_document(&resp.body)
+            .with_context(|| format!("failed to parse JRG document from {page_url_str}"))?;
+
+        let inputs: Vec<_> = doc
+            .blocks
+            .iter()
+            .filter_map(|b| {
+                if let Block::Input(input) = b {
+                    Some(input.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if fields.is_empty() {
+            // Print form fields and exit
+            let page_label = if page == "register.jrg" { "/register.jrg" } else { "/login.jrg" };
+            println!("Form fields on {host}:{port}{page_label}:");
+            if inputs.is_empty() {
+                println!("  (no input fields found — try with -f name=value pairs)");
+            } else {
+                for input in &inputs {
+                    println!(
+                        "  - {} (name={}{})",
+                        input.label,
+                        input.name,
+                        input.placeholder.as_ref()
+                            .map(|p| format!(", placeholder={p}"))
+                            .unwrap_or_default()
+                    );
+                }
+            }
+            println!();
+            println!("Use -f name=value to fill fields and submit, e.g.:");
+            if let Some(first) = inputs.first() {
+                println!("  jaringan auth register {service} -f {}='<value>'", first.name);
+            }
+            return Ok(());
+        }
+
+        // Build form body from fields
+        let body = fields.iter()
+            .filter_map(|f| {
+                let (name, value) = f.split_once('=')?;
+                Some(format!("{}={}", name, value))
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+
+        // POST the form data via JRG TCP with action token from the button
+        let action_url_str = format!("jrg://{host}:{port}/actions/{page_type}",
+            page_type = page.strip_suffix(".jrg").unwrap_or(page));
+        let action_url = JaringanUrl::parse(&action_url_str)
+            .with_context(|| format!("invalid JRG URL: {action_url_str}"))?;
+
+        // Find the button's auth token from stored tokens, using the button's auth attribute as service name
+        let auth_service: Option<String> = doc.blocks.iter().find_map(|b| {
+            if let Block::Button(btn) = b {
+                btn.auth.clone()
+            } else {
+                None
+            }
+        });
+        let auth_token: Option<String> = auth_service.as_ref()
+            .and_then(|s| lookup_stored_token(s));
+
+        let post_resp = match &auth_token {
+            Some(token) => post_tcp_with_action_token(&action_url, body.clone(), token)
+                .with_context(|| format!("failed to POST to {action_url_str}"))?,
+            None => post_tcp(&action_url, body.clone())
+                .with_context(|| format!("failed to POST to {action_url_str}"))?,
+        };
+
+        // Check response tags for Token
+        for tag in &post_resp.tags {
+            if let ResponseTag::Token {
+                service: tok_service,
+                value: tok_value,
+                expires_at: tok_expires,
+            } = tag
+            {
+                let service_name = if tok_service.is_empty() {
+                    format!("{host}:{port}")
+                } else {
+                    tok_service.clone()
+                };
+                store_token(
+                    &service_name,
+                    tok_value,
+                    None,
+                    tok_expires.as_deref(),
+                )?;
+                println!("✅ Token stored for '{}' ({} chars).", service_name, tok_value.len());
+                return Ok(());
+            }
+        }
+
+        // No token tag — print the response body
+        println!("Response from {action_url_str}:");
+        let response_doc = parse_document(&post_resp.body)
+            .unwrap_or(Document::new(vec![]));
+        println!("{}", render_plain(&response_doc));
+    } else {
+        // ——— HTTP fallback path (existing behavior) ———
+        let http_base = service.trim_end_matches('/').to_string();
+        let url = format!("{}/{}", http_base, page);
+        eprintln!("Fetching {url} ...");
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .context("failed to build HTTP client")?;
+
+        let resp = client
+            .get(&url)
+            .send()
+            .with_context(|| format!("failed to fetch {url}"))?;
+
+        let status = resp.status();
+        let body = resp.text().with_context(|| format!("failed to read response body from {url}"))?;
+
+        if !status.is_success() {
+            bail!("HTTP {status} when fetching {url}");
+        }
+
+        let doc = parse_document(&body)
+            .with_context(|| format!("failed to parse JRG document from {url}"))?;
+
+        let inputs: Vec<_> = doc
+            .blocks
+            .iter()
+            .filter_map(|b| {
+                if let Block::Input(input) = b {
+                    Some(input.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if fields.is_empty() {
+            println!("Form fields for {url}:");
+            if inputs.is_empty() {
+                println!("  (no input fields found — try with -f name=value pairs)");
+            } else {
+                for input in &inputs {
+                    println!(
+                        "  - {} (name={}{})",
+                        input.label,
+                        input.name,
+                        input.placeholder.as_ref()
+                            .map(|p| format!(", placeholder={p}"))
+                            .unwrap_or_default()
+                    );
+                }
+            }
+            println!();
+            println!("Use -f name=value to fill fields and submit, e.g.:");
+            if let Some(first) = inputs.first() {
+                println!("  jaringan auth register {service} -f {}='<value>'", first.name);
+            }
+            return Ok(());
+        }
+
+        let mut form_data = HashMap::new();
+        for f in fields {
+            if let Some((name, value)) = f.split_once('=') {
+                form_data.insert(name.to_string(), value.to_string());
+            } else {
+                eprintln!("Warning: skipping malformed field '{f}' (expected name=value)");
+            }
+        }
+
+        let post_resp = client
+            .post(&url)
+            .form(&form_data)
+            .send()
+            .with_context(|| format!("failed to POST to {url}"))?;
+
+        let post_status = post_resp.status();
+        let post_body = post_resp.text().with_context(|| format!("failed to read POST response from {url}"))?;
+
+        if !post_status.is_success() {
+            bail!("HTTP {post_status} when submitting form to {url}");
+        }
+
+        // Try JrgToHttpResolver to get token tags
+        let resolver = jaringan_gateway::JrgToHttpResolver::new(
+            jaringan_gateway::JrgToHttpResolverConfig::default(),
+        );
+
+        let jrg_url_str = format!("jrg://https.{}/{}", http_base
+            .trim_start_matches("https://")
+            .trim_start_matches("http://"), page);
+        let jrg_url = JaringanUrl::parse(&jrg_url_str)
+            .context("failed to parse JRG URL for token check")?;
+
+        let jrg_req = Request::new(jrg_url);
+        match resolver.fetch(&jrg_req) {
+            Ok(jrg_resp) => {
+                for tag in &jrg_resp.tags {
+                    if let ResponseTag::Token {
+                        service: tok_service,
+                        value: tok_value,
+                        expires_at: tok_expires,
+                    } = tag
+                    {
+                        let service_name = if tok_service.is_empty() {
+                            http_base
+                                .trim_start_matches("https://")
+                                .trim_start_matches("http://")
+                                .to_string()
+                        } else {
+                            tok_service.clone()
+                        };
+                        store_token(
+                            &service_name,
+                            tok_value,
+                            None,
+                            tok_expires.as_deref(),
+                        )?;
+                        println!("Token stored for '{}' ({} chars).", service_name, tok_value.len());
+                        return Ok(());
+                    }
+                }
+                let post_doc = parse_document(&post_body)
+                    .with_context(|| format!("failed to parse POST response from {url}"))?;
+                println!("Response from {url}:");
+                println!("{}", render_plain(&post_doc));
+            }
+            Err(e) => {
+                eprintln!("Note: could not check for token tags via gateway ({e})");
+                let post_doc = parse_document(&post_body)
+                    .with_context(|| format!("failed to parse POST response from {url}"))?;
+                println!("Response from {url}:");
+                println!("{}", render_plain(&post_doc));
+            }
+        }
     }
 
     Ok(())
@@ -874,6 +1298,16 @@ fn print_response(response: Response) {
                 println!("Tag-Key: {key_id} ed25519:{key_base64}")
             }
             ResponseTag::ContentType { value } => println!("Tag-ContentType: {value}"),
+            ResponseTag::Token {
+                service,
+                value,
+                expires_at,
+            } => println!(
+                "Tag-Token: service={service} value={value}{}",
+                expires_at
+                    .map(|e| format!(" expires_at={e}"))
+                    .unwrap_or_default()
+            ),
         }
     }
     println!();
@@ -1009,6 +1443,7 @@ fn block_summary_json(block: &Block) -> serde_json::Value {
         Block::Table(_) => "table",
         Block::Preformatted { .. } => "preformatted",
         Block::Script { .. } => "script",
+        Block::Auth { .. } => "auth",
     };
     let text = match block {
         Block::Paragraph(s) => Some(s.clone()),
@@ -1061,7 +1496,7 @@ fn run_app(
     // Create a bridge that lets WASM scripts call host functions
     let bridge_timeout = cfg.gateway.timeout_secs;
     let bridge: Option<BridgeState> = Some(BridgeState {
-        fetch_fn: Some(std::sync::Arc::new(move |url: &str| {
+        fetch_fn: Some(std::sync::Arc::new(move |url: &str, _token: Option<&str>| {
             (|| -> Result<String, String> {
                 let result = if url.starts_with("http://") || url.starts_with("https://") {
                     // Web URL: use JrgToHttpResolver gateway (with user's timeout)
@@ -1111,6 +1546,7 @@ fn run_app(
         store: None,
         resolve_fn: None,
         page_inputs: None,
+        tokens: None,
     });
 
     // Initialize plugin registry from ~/.config/jaringan/plugins/
@@ -1878,8 +2314,12 @@ fn activate_button(
             let action_url = current
                 .resolve(&target)
                 .with_context(|| format!("bad action target `{target}`"))?;
-            let response = if let Some(token) = auth.as_deref() {
-                post_tcp_with_action_token(&action_url, payload, token)?
+            let response = if let Some(auth_service) = auth.as_deref() {
+                // Look up stored token by service name; button works without one
+                match lookup_stored_token(auth_service) {
+                    Some(token) => post_tcp_with_action_token(&action_url, payload, &token)?,
+                    None => post_tcp(&action_url, payload)?,
+                }
             } else {
                 post_tcp(&action_url, payload)?
             };
@@ -1906,8 +2346,11 @@ fn activate_button(
                 .with_context(|| format!("bad action target `{target}`"))?;
             let resolver = LocalFileResolver::new(root);
             let mut request = Request::post(action_url, payload);
-            if let Some(token) = auth.as_deref() {
-                request = request.with_action_token(token);
+            if let Some(auth_service) = auth.as_deref() {
+                // Look up stored token by service name; button works without one
+                if let Some(token) = lookup_stored_token(auth_service) {
+                    request = request.with_action_token(&token);
+                }
             }
             let response = resolver.fetch(&request)?;
             let mut document = document_from_response(&response)?;
@@ -2365,7 +2808,10 @@ fn load_network_page_with_keyring(
 fn redirect_target(response: &Response) -> Option<&str> {
     response.tags.iter().find_map(|tag| match tag {
         ResponseTag::Redirect { target } => Some(target.as_str()),
-        ResponseTag::Stream | ResponseTag::Key { .. } | ResponseTag::ContentType { .. } => None,
+        ResponseTag::Stream
+        | ResponseTag::Key { .. }
+        | ResponseTag::ContentType { .. }
+        | ResponseTag::Token { .. } => None,
     })
 }
 
@@ -2853,6 +3299,20 @@ fn render_lines(page: &LoadedPage, selected: usize, find_state: &FindState, find
                 lines.push(Line::raw(""));
             }
             Block::Script { .. } => {} // Script blocks are not rendered visually
+            Block::Auth { service, scope, ttl } => {
+                let mut text = format!("[auth] {}", service);
+                if let Some(scope) = scope {
+                    text.push_str(&format!(" scope=\"{}\"", scope));
+                }
+                if let Some(ttl) = ttl {
+                    text.push_str(&format!(" ttl=\"{}\"", ttl));
+                }
+                lines.push(Line::from(Span::styled(
+                    text,
+                    Style::default().fg(Color::LightBlue),
+                )));
+                lines.push(Line::raw(""));
+            }
         }
     }
 
@@ -3503,6 +3963,9 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
+
+        // Store a token for the demo-search service so the button action works
+        store_token("demo-search", "demo-search", None, None).unwrap();
         let document = parse_document(
             "# Tools\n\n? q label=\"Query\" value=\"laksa\"\n! search label=\"Search\" method=\"POST\" target=\"/actions/search\" confirm=\"Submit search?\" auth=\"demo-search\"\n",
         )

@@ -1,0 +1,14 @@
+[package]
+name = "jaringan-demo-microblog"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+jaringan-core.workspace = true
+jaringan-protocol.workspace = true
+jaringan-render.workspace = true
+jaringan-script.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rand = "0.8"
+hex = "0.4"

@@ -79,6 +79,7 @@ extern "C" {
     fn store_set(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> i32;
     fn resolve(ptr: i32, len: i32) -> i32;
     fn input(ptr: i32, len: i32) -> i32;
+    fn provide_token(service_ptr: i32, service_len: i32, token_ptr: i32, token_len: i32) -> i32;
 }
 
 // ── Memory constants ────────────────────────────────────────────────
@@ -242,6 +243,42 @@ pub fn js_input(name: &str) -> Result<String, String> {
         core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), SCRATCH as *mut u8, name_bytes.len());
     }
     let _result_ptr = unsafe { input(SCRATCH as i32, name_bytes.len() as i32) };
+    let result = unsafe {
+        let len = core::ptr::read_unaligned(OUTPUT as *const u32);
+        let slice = core::slice::from_raw_parts((OUTPUT + 4) as *const u8, len as usize);
+        let v: Vec<u8> = slice.to_vec();
+        String::from_utf8(v).unwrap_or_default()
+    };
+    Ok(result)
+}
+
+/// Provide an auth token for a service via `jaringan.provide_token`.
+///
+/// Writes `service` to SCRATCH, then `token` immediately after it,
+/// calls the host function, and reads the JSON result from OUTPUT.
+/// The host returns `{"ok": true}` on success or `{"error": "..."}` on failure.
+pub fn js_provide_token(service: &str, token: &str) -> Result<String, String> {
+    let service_bytes = service.as_bytes();
+    let token_bytes = token.as_bytes();
+    // Write service and token sequentially to scratch zone
+    unsafe {
+        core::ptr::copy_nonoverlapping(service_bytes.as_ptr(), SCRATCH as *mut u8, service_bytes.len());
+        core::ptr::copy_nonoverlapping(
+            token_bytes.as_ptr(),
+            (SCRATCH + service_bytes.len()) as *mut u8,
+            token_bytes.len(),
+        );
+    }
+    // Call host — reads service/token from SCRATCH, writes result to OUTPUT
+    let _result_ptr = unsafe {
+        provide_token(
+            SCRATCH as i32,
+            service_bytes.len() as i32,
+            (SCRATCH + service_bytes.len()) as i32,
+            token_bytes.len() as i32,
+        )
+    };
+    // Read result from OUTPUT (4‑byte LE length + body)
     let result = unsafe {
         let len = core::ptr::read_unaligned(OUTPUT as *const u32);
         let slice = core::slice::from_raw_parts((OUTPUT + 4) as *const u8, len as usize);

@@ -2,6 +2,7 @@
 members = [
     "crates/jaringan-browser",
     "crates/jaringan-core",
+    "crates/jaringan-demo-microblog",
     "crates/jaringan-formatter",
     "crates/jaringan-gateway",
     "crates/jaringan-plugins",

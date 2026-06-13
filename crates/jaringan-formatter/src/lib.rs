@@ -133,6 +133,16 @@ impl JrgFormatter {
                         let _ = writeln!(out, "~>");
                     }
                 }
+                Block::Auth { service, scope, ttl } => {
+                    let _ = write!(out, "@{}", service);
+                    if let Some(scope) = scope {
+                        let _ = write!(out, " scope=\"{}\"", scope);
+                    }
+                    if let Some(ttl) = ttl {
+                        let _ = write!(out, " ttl=\"{}\"", ttl);
+                    }
+                    let _ = writeln!(out);
+                }
             }
 
             // Blank line separator between blocks
@@ -181,6 +191,7 @@ impl JrgFormatter {
                     Block::Table(_) => "table",
                     Block::Preformatted { .. } => "preformatted",
                     Block::Script { .. } => "script",
+                    Block::Auth { .. } => "auth",
                 });
             }
         }
@@ -392,6 +403,7 @@ impl JrgFormatter {
             Block::Table(table) => 2 + table.rows.len(), // header + sep + data rows
             Block::Preformatted { code, .. } => 2 + code.lines().count(), // ```open + body lines + ```
             Block::Script { .. } => 1, // ~> header only in formatted output
+            Block::Auth { .. } => 1,
         }
     }
 }

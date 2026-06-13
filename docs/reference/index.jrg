@@ -2,6 +2,11 @@
 
 => cli.jrg CLI Reference
 => protocol.jrg Protocol Reference
+=> ../spec/jrg-protocol.jrg JRG Protocol Specification
+=> ../spec/jrg-page-format.jrg JRG Page Format Specification
+=> ../spec/jrg-encryption.jrg JRG Encryption Specification
+=> ../spec/jrg-security.jrg JRG Security Specification
+=> ../spec/jrg-search.jrg JRG Search Specification
 
 ~~~
 title: Reference

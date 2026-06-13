@@ -42,6 +42,21 @@ impl Document {
                 .filter(|value| !value.is_empty())
         })
     }
+
+    pub fn auth_service(&self) -> Option<&str> {
+        let metadata = self.metadata.as_ref()?;
+        metadata_value(metadata, "auth-service")
+    }
+
+    pub fn auth_scope(&self) -> Option<&str> {
+        let metadata = self.metadata.as_ref()?;
+        metadata_value(metadata, "auth-scope")
+    }
+
+    pub fn auth_ttl(&self) -> Option<&str> {
+        let metadata = self.metadata.as_ref()?;
+        metadata_value(metadata, "auth-ttl")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +84,15 @@ pub enum Block {
         wasm: Vec<u8>,
         /// Optional label for display/debugging.
         label: Option<String>,
+    },
+    /// An authentication declaration for a service (e.g. `@api.example.com scope="..."`).
+    Auth {
+        /// The service identifier (e.g. "api.example.com").
+        service: String,
+        /// Optional scope string (e.g. "read write").
+        scope: Option<String>,
+        /// Optional TTL (e.g. "7d").
+        ttl: Option<String>,
     },
 }
 
@@ -333,6 +357,7 @@ impl SearchEntry {
                         body_parts.push(label.clone());
                     }
                 }
+                Block::Auth { service, .. } => body_parts.push(service.clone()),
             }
         }
         let title = document.title().unwrap_or("Untitled").to_owned();
@@ -677,6 +702,7 @@ impl<'a> Parser<'a> {
             || parse_image(trimmed).is_some()
             || trimmed == "~~~~~"
             || trimmed.starts_with("~>")
+            || trimmed.starts_with('@')
     }
 
     fn new(input: &'a str) -> Self {
@@ -724,6 +750,9 @@ impl<'a> Parser<'a> {
                 self.cursor += 1;
             } else if let Some(button) = parse_button(trimmed) {
                 self.blocks.push(Block::Button(button));
+                self.cursor += 1;
+            } else if let Some(auth) = parse_auth(trimmed) {
+                self.blocks.push(auth);
                 self.cursor += 1;
             } else if let Some(image) = parse_image(trimmed) {
                 self.blocks.push(Block::Image(image));
@@ -1048,6 +1077,30 @@ fn parse_input(line: &str) -> Option<Input> {
         label,
         value,
         placeholder,
+    })
+}
+
+fn parse_auth(line: &str) -> Option<Block> {
+    let remainder = line.strip_prefix('@')?.trim();
+    let mut parts = remainder.splitn(2, char::is_whitespace);
+    let service = parts.next()?.trim();
+    if service.is_empty() {
+        return None;
+    }
+    let attrs = parts.next().unwrap_or_default();
+    let scope = parse_quoted_attr(attrs, "scope");
+    let ttl = parse_quoted_attr(attrs, "ttl");
+
+    // Only match as auth if scope or ttl attributes are present
+    // (otherwise it falls through to parse_image for @-prefixed lines)
+    if scope.is_none() && ttl.is_none() {
+        return None;
+    }
+
+    Some(Block::Auth {
+        service: service.to_owned(),
+        scope,
+        ttl,
     })
 }
 

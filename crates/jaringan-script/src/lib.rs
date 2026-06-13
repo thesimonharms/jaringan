@@ -188,10 +188,33 @@ impl WasmRuntime {
                     read_string(&mem, &ctx, url_ptr, url_len)
                 };
 
+                // Look up a stored auth token for this URL's host.
+                let auth_token: Option<String> = {
+                    let state = caller.data();
+                    state.tokens.as_ref().and_then(|tokens| {
+                        // Extract hostname from URL (between :// and next / or end)
+                        let host = url
+                            .split("://")
+                            .nth(1)
+                            .and_then(|rest| rest.split('/').next())
+                            .unwrap_or("");
+                        // Check if any stored token's service matches the host
+                        // (exact match or service is a prefix of the host, e.g.
+                        //  "api.example.com" matches token stored for "api.example.com")
+                        tokens.iter().find_map(|(service, stored)| {
+                            if host == service.as_str() || host.ends_with(&format!(".{}", service)) {
+                                Some(stored.value.clone())
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                };
+
                 let state = caller.data(); // &BridgeState
 
                 match state.fetch_fn {
-                    Some(ref fetch) => match fetch(&url) {
+                    Some(ref fetch) => match fetch(&url, auth_token.as_deref()) {
                         Ok(result_json) => {
                             let mut ctx = caller.as_context_mut();
                             write_json(&mem, &mut ctx, &result_json)
@@ -409,6 +432,40 @@ impl WasmRuntime {
             },
         )?;
 
+        // (import "jaringan" "provide_token" (func (param i32 i32 i32 i32) (result i32)))
+        linker.func_wrap(
+            "jaringan",
+            "provide_token",
+            |mut caller: Caller<'_, BridgeState>,
+             service_ptr: i32, service_len: i32,
+             token_ptr: i32, token_len: i32| -> i32 {
+                let mem = caller
+                    .get_export("memory")
+                    .and_then(|e| e.into_memory())
+                    .expect("memory export required for jaringan.provide_token");
+
+                let service = {
+                    let ctx = caller.as_context();
+                    read_string(&mem, &ctx, service_ptr, service_len)
+                };
+                let token = {
+                    let ctx = caller.as_context();
+                    read_string(&mem, &ctx, token_ptr, token_len)
+                };
+
+                let state = caller.data_mut();
+                let tokens = state.tokens.get_or_insert_with(HashMap::new);
+                tokens.insert(service.clone(), bridge::StoredToken {
+                    value: token,
+                    service,
+                    expires_at: None,
+                });
+
+                let mut ctx = caller.as_context_mut();
+                write_json(&mem, &mut ctx, r#"{"ok":true}"#)
+            },
+        )?;
+
         // ── Instantiate ──────────────────────────────────────────────────────
         let instance = linker.instantiate(&mut store, &module)?;
 
@@ -499,6 +556,7 @@ pub fn blocks_to_script_blocks(blocks: &[jaringan_core::Block]) -> Vec<ScriptBlo
         Block::Table(t) => ScriptBlock::Table { headers: t.headers.clone(), rows: t.rows.clone() },
         Block::Preformatted { code, language } => ScriptBlock::Code { language: language.clone(), text: code.clone() },
         Block::Script { wasm: _, label: _ } => ScriptBlock::Paragraph { text: "[script block]".into() },
+        Block::Auth { service, .. } => ScriptBlock::Paragraph { text: format!("[auth] {}", service) },
     }).collect()
 }
 
@@ -720,7 +778,7 @@ mod tests {
         let log_called_clone = log_called.clone();
 
         let bridge = bridge::BridgeState {
-            fetch_fn: Some(std::sync::Arc::new(move |url: &str| {
+            fetch_fn: Some(std::sync::Arc::new(move |url: &str, _token: Option<&str>| {
                 fetch_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
                 assert_eq!(url, "jrg://example/test.jrg");
                 Ok(r#"{"status":200}"#.into())
@@ -734,6 +792,7 @@ mod tests {
             store: None,
             resolve_fn: None,
             page_inputs: None,
+            tokens: None,
         };
 
         let input = ScriptInput {

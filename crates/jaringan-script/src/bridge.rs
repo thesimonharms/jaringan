@@ -2,15 +2,25 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use wasmtime::{AsContext, AsContextMut, Memory};
 
+/// A token stored for a service, used for auto-injection of Bearer auth
+/// headers on fetch calls.
+#[derive(Clone, Debug)]
+pub struct StoredToken {
+    pub value: String,
+    pub service: String,
+    pub expires_at: Option<String>,
+}
+
 /// Holds optional closures that WASM scripts can call via imported host functions.
 #[derive(Clone)]
 pub struct BridgeState {
-    pub fetch_fn: Option<Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>>,
+    pub fetch_fn: Option<Arc<dyn Fn(&str, Option<&str>) -> Result<String, String> + Send + Sync>>,
     pub navigate_fn: Option<Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>>,
     pub log_fn: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
     pub store: Option<HashMap<String, String>>,
     pub resolve_fn: Option<Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>>,
     pub page_inputs: Option<HashMap<String, String>>,
+    pub tokens: Option<HashMap<String, StoredToken>>,
 }
 
 impl BridgeState {
@@ -23,7 +33,19 @@ impl BridgeState {
             store: None,
             resolve_fn: None,
             page_inputs: None,
+            tokens: None,
         }
+    }
+
+    /// Add a token for the given service, returning self for builder-style chaining.
+    pub fn with_token(mut self, service: &str, token: &str) -> Self {
+        let tokens = self.tokens.get_or_insert_with(HashMap::new);
+        tokens.insert(service.to_string(), StoredToken {
+            value: token.to_string(),
+            service: service.to_string(),
+            expires_at: None,
+        });
+        self
     }
 }
 

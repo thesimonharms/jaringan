@@ -60,6 +60,8 @@ jrg://example.org/docs/start.jrg?old=1#section-two
 
 The first transport is intentionally tiny and line-oriented. `jrg://` remains the single scheme as security features evolve; signing or encryption should not create a second protocol name. Browsers surface whether a page is secure or not secure instead of refusing unsigned content by default.
 
+All examples in this spec use port `7070` — the conventional default for JRG servers. The `jaringan-browser serve` command and all CLI fetch/get examples follow this convention. When running multiple services on the same host, increment the port (e.g. `7071`, `7072`).
+
 Client request:
 
 ```text
@@ -78,6 +80,8 @@ Content-Length: 7
 
 q=laksa
 ```
+
+The `Action-Token` value is resolved from the button's `auth` attribute — the browser treats `auth` as a **service name** and looks up the real token under `~/.config/jaringan/tokens/<service>/token`. If no stored token is found, the action proceeds without the header (assuming the resolver allows unauthenticated requests). The token is issued by a server returning a `Tag-Token` response header (see [Token registration flow](#token-registration-flow) below).
 
 The request target may be either a full `jrg://` URL or an absolute path when a `Host:` header is present. `Action-Token:` is optional at the wire level, but side-effectful resolvers can require it before executing an action.
 
@@ -212,13 +216,130 @@ Content types:
 
 ## Response tags
 
-Redirects are represented as tags instead of magic browser behavior:
+Redirects and tokens are represented as tags instead of magic browser behavior:
 
 ```rust
 ResponseTag::Redirect { target }
+ResponseTag::Token { service, value, expires_at }
 ```
 
-The prototype terminal browser follows redirect tags automatically for `jrg://` pages, resolving relative redirect targets against the current page URL and stopping after a small redirect limit. The lower-level `get` command prints the response as-is by default; `get --follow` follows redirect tags before printing the final response.
+- `Tag-Redirect` — the prototype terminal browser follows redirect tags automatically for `jrg://` pages, resolving relative redirect targets against the current page URL and stopping after a small redirect limit. The lower-level `get` command prints the response as-is by default; `get --follow` follows redirect tags before printing the final response.
+- `Tag-Token` — issued by a server-side registration or login endpoint to grant a capability token. The three fields map to HTTP-style headers:
+  - `service` — the service name the token is valid for. Empty means the host is the service.
+  - `value` — the opaque token string (e.g., a UUID).
+  - `expires_at` — optional expiry (e.g., `2026-12-31T23:59:59Z`). Omitted or empty means never expires.
+
+### Token registration flow
+
+A Jaringan page can require auth by adding the `auth` attribute to its buttons:
+
+```text
+! post label="Post" method="POST" target="/actions/post" auth="microblog"
+```
+
+The `auth` value is a **service name** — not the token itself. The browser looks up the real token from `~/.config/jaringan/tokens/<service>/token` when the button is activated.
+
+For a user to obtain a token, the server must provide a register or login page. The `jaringan auth register` CLI command:
+
+1. Fetches the register page over JRG TCP
+2. Fills any provided form fields (`-f username=Simon`) and POSTs to `/actions/register`
+3. Checks the response for a `Tag-Token` header
+4. Stores the token value at `~/.config/jaringan/tokens/<service>/token`
+
+**Server authors** implement registration by returning `Tag-Token` from the register endpoint:
+
+```text
+JRG/0.1 200 OK
+Content-Type: text/jrg; charset=utf-8
+Tag-Token: microblog.localhost:7072; value=550e8400e29b41d4a716446655440000
+# ✅ Registered!
+```
+
+The `service` field in `Tag-Token` determines where the CLI stores the token. When a button has `auth="microblog"`, the browser searches stored token directories for any name starting with `microblog.` or `microblog:`, finding `microblog.localhost:7072`.
+
+**Revocation** — `jaringan auth revoke <service>` removes the stored token directory. Servers may also expire tokens by re-checking them against their own store.
+
+### Reference implementation: microblog demo
+
+The full source is at `crates/jaringan-demo-microblog/src/main.rs`. Key pieces:
+
+**Page templates** — buttons carry `auth` as a service name:
+
+```rust
+const REGISTER_JRG: &str = r#"...
+!register label="📝 Sign Up" target="/actions/register" method="POST" auth="microblog"
+..."#;
+
+const MICROBLOG_JRG: &str = r#"...
+!post label="📤 Post" target="/actions/post" method="POST" auth="microblog"
+..."#;
+```
+
+Both buttons share `auth="microblog"`. The register button doesn't need an existing token — the browser sends no `Action-Token` since none is stored yet, and the server treats a missing token as a registration request. The post button does require a token, so the user must register first.
+
+**Register handler** — generates a random token, stores it, returns `Tag-Token`:
+
+```rust
+fn handle_register(&self, body: &str) -> Response {
+    let token_bytes: [u8; 16] = rand::random();
+    let token = hex::encode(token_bytes);
+    let expires = Instant::now() + Duration::from_secs(3600);
+
+    self.tokens.lock().unwrap().insert(
+        token.clone(),
+        TokenInfo { username, expires_at: expires },
+    );
+
+    Response::page(StatusCode::Ok, body)
+        .with_tag(ResponseTag::Token {
+            service: format!("microblog.localhost:{}", self.port),
+            value: token,
+            expires_at: None,
+        })
+}
+```
+
+The `service` field — `"microblog.localhost:7072"` — is where the CLI stores the token. When a button has `auth="microblog"`, the browser finds this directory by prefix matching.
+
+**Post handler** — reads `action_token` from the wire-level request, validates against stored tokens:
+
+```rust
+fn handle_post(&self, request: &Request) -> Response {
+    let token = request.action_token.as_deref().unwrap_or("");
+    let tokens = self.tokens.lock().unwrap();
+    let token_info = tokens.get(&token).cloned();
+    drop(tokens);
+
+    match token_info {
+        Some(info) if info.expires_at > Instant::now() => {
+            // store post, return updated feed...
+        }
+        _ => {
+            // return page with error prompting registration
+        }
+    }
+}
+```
+
+**Routing** — `PageResolver::fetch()` dispatches by method and path:
+
+```rust
+impl PageResolver for MicroblogResolver {
+    fn fetch(&self, request: &Request) -> Result<Response, ResolveError> {
+        match (request.method, request.url.path()) {
+            (RequestMethod::Get, "/register") =>
+                Ok(Response::page(StatusCode::Ok, REGISTER_JRG)),
+            (RequestMethod::Post, "/actions/register") =>
+                Ok(self.handle_register(&request.body)),
+            (RequestMethod::Post, "/actions/post") =>
+                Ok(self.handle_post(request)),
+            // ...
+        }
+    }
+}
+```
+
+The resolver is passed to `jaringan_protocol::serve()` which handles the TCP transport. Tags like `ResponseTag::Token` are serialized automatically to `Tag-*` response headers.
 
 ## Local resolver
 
