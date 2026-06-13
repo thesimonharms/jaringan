@@ -100,3 +100,18 @@ Specs:
 - `docs/spec/jrg-security.md`
 - `docs/spec/jrg-encryption.md`
 - `docs/spec/jrg-search.md`
+
+## Live Demo
+
+The documentation and example pages are hosted live:
+
+| Endpoint | Protocol | What you can do |
+|----------|----------|-----------------|
+| [http-gateway.simonharms.xyz](https://http-gateway.simonharms.xyz) | HTTP | Browse JRG docs/demos in any browser (rendered HTML) |
+| [jrg://jrg.simonharms.xyz](jrg://jrg.simonharms.xyz) | JRG TCP | Access the same content natively via `jaringan-browser get` or `open` |
+
+To browse via JRG:
+```bash
+jaringan-browser get jrg://jrg.simonharms.xyz/
+jaringan-browser open jrg://jrg.simonharms.xyz/
+```
