@@ -718,20 +718,49 @@ fn main() -> anyhow::Result<()> {
             encrypted_key_id,
             advertise_key,
         } => {
-            let listener = TcpListener::bind(&bind)
+            let bind = ensure_port(&bind);
+            let v4_listener = TcpListener::bind(&bind)
                 .with_context(|| format!("failed to bind Jaringan server to {bind}"))?;
-            if let Some(key_id) = encrypted_key_id {
+
+            // Build the resolver (shared across IPv4 and IPv6 listeners)
+            let resolver: Arc<dyn PageResolver> = if let Some(key_id) = encrypted_key_id {
                 let config = encrypted_tcp_config_from_env(&key_id)?;
                 eprintln!("serving encrypted {} at jrg://{bind}/", root.display());
-                serve_encrypted(listener, LocalFileResolver::new(root), &config)?;
+                let r = LocalFileResolver::new(root);
+                serve_encrypted(v4_listener, Arc::new(r), &config)?;
+                return Ok(());
             } else if let Some(key_id) = advertise_key {
                 let key_base64 = lookup_keyring_key(&key_id)?;
-                let resolver = LocalFileResolver::new_with_key(root.clone(), key_id, key_base64);
+                let r = LocalFileResolver::new_with_key(root.clone(), key_id, key_base64);
                 eprintln!("serving {} at jrg://{bind}/ (advertising key)", root.display());
-                serve(listener, resolver)?;
+                Arc::new(r) as Arc<dyn PageResolver>
             } else {
                 eprintln!("serving {} at jrg://{bind}/", root.display());
-                serve(listener, LocalFileResolver::new(root))?;
+                Arc::new(LocalFileResolver::new(root)) as Arc<dyn PageResolver>
+            };
+
+            // Try IPv6 localhost (dual-stack) so `localhost` -> `::1` resolves correctly
+            let v4_port = v4_listener.local_addr()?.port();
+            let v6_bind = format!("[::1]:{v4_port}");
+            let v6_handle = match TcpListener::bind(&v6_bind) {
+                Ok(v6_listener) => {
+                    eprintln!("  (also listening on {v6_bind})");
+                    let v6_resolver = resolver.clone();
+                    Some(std::thread::spawn(move || {
+                        let _ = serve(v6_listener, v6_resolver);
+                    }))
+                }
+                Err(e) => {
+                    eprintln!("  (IPv6 localhost not available: {e})");
+                    None
+                }
+            };
+
+            serve(v4_listener, resolver)?;
+
+            // Wait for IPv6 thread if it was spawned (serve only returns on error)
+            if let Some(handle) = v6_handle {
+                let _ = handle.join();
             }
         }
         Command::Index { root, output } => {
@@ -850,6 +879,8 @@ fn main() -> anyhow::Result<()> {
                 enable_http_bridge,
                 timeout,
             } => {
+                let http_listen = ensure_port(&http_listen);
+                let jrg_host = ensure_port(&jrg_host);
                 let rt = tokio::runtime::Runtime::new()
                     .context("failed to create tokio runtime")?;
                 rt.block_on(async {
@@ -874,6 +905,7 @@ fn main() -> anyhow::Result<()> {
                 timeout,
                 max_response_size,
             } => {
+                let jrg_listen = ensure_port(&jrg_listen);
                 let resolver = jaringan_gateway::JrgToHttpResolver::new(
                     jaringan_gateway::JrgToHttpResolverConfig {
                         user_agent,
@@ -3464,6 +3496,23 @@ fn spinner(elapsed: Duration) -> &'static str {
 
 fn canonicalish(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Append `:7070` to an address string if it doesn't already have a port.
+fn ensure_port(addr: &str) -> String {
+    // IPv6: "[::1]" or "[::1]:7070" — strip brackets to check for port
+    if addr.starts_with('[') {
+        let after_bracket = addr.find(']').map(|i| &addr[i + 1..]).unwrap_or("");
+        if after_bracket.starts_with(':') {
+            addr.to_owned() // already has port
+        } else {
+            format!("{}:7070", addr.trim_end_matches('/'))
+        }
+    } else if addr.contains(':') {
+        addr.to_owned() // already has port
+    } else {
+        format!("{}:7070", addr.trim_end_matches('/'))
+    }
 }
 
 fn help_lines() -> Vec<Line<'static>> {

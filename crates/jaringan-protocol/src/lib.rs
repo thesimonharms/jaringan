@@ -3,6 +3,7 @@ use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream, ToSocketAddrs},
     path::{Component, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -485,8 +486,15 @@ impl ContentType {
     }
 }
 
-pub trait PageResolver {
+pub trait PageResolver: Send + Sync {
     fn fetch(&self, request: &Request) -> Result<Response, ResolveError>;
+}
+
+/// Blanket impl so Arc<T> can be used as a PageResolver when T: PageResolver.
+impl<T: PageResolver + ?Sized> PageResolver for Arc<T> {
+    fn fetch(&self, request: &Request) -> Result<Response, ResolveError> {
+        T::fetch(self, request)
+    }
 }
 
 /// A resolver that serves files from a local directory root.
@@ -671,9 +679,41 @@ pub enum ResolveError {
     Write { path: PathBuf, source: io::Error },
 }
 
+/// Maximum concurrent JRG connections. Beyond this, new connections are immediately dropped.
+const MAX_CONCURRENT: usize = 256;
+
 pub fn serve(listener: TcpListener, resolver: impl PageResolver) -> Result<(), WireError> {
+    let active = std::sync::atomic::AtomicUsize::new(0);
     for stream in listener.incoming() {
-        serve_stream(stream?, &resolver)?;
+        let mut stream = match stream {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        // Enforce connection limit
+        let prev = active.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if prev >= MAX_CONCURRENT {
+            active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            continue;
+        }
+        // Set timeouts: 10s for initial read, 60s for overall
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+        let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(60)));
+        let active_ref = &active;
+        if let Err(e) = serve_stream(stream, &resolver) {
+            active_ref.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            match &e {
+                WireError::BadRequest | WireError::BadResponse | WireError::BadAddress | WireError::Resolve(_) => continue,
+                WireError::Io(ioe)
+                    if ioe.kind() == std::io::ErrorKind::ConnectionReset
+                        || ioe.kind() == std::io::ErrorKind::BrokenPipe
+                        || ioe.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    continue;
+                }
+                _ => return Err(e),
+            }
+        }
+        active_ref.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
     Ok(())
 }
@@ -826,26 +866,64 @@ pub fn fetch_tcp_with_timeout(url: &JaringanUrl, timeout: Duration) -> Result<Re
     send_tcp_with_timeout(Request::new(url.clone()), timeout)
 }
 
-/// Resolve a host:port pair to a socket address with a timeout.
-/// Prevents indefinite blocking on slow/malicious DNS servers.
-fn resolve_addr(host: &str, port: u16, timeout: Duration) -> Result<std::net::SocketAddr, WireError> {
+/// Resolve a host and try connecting on the given port. Tries each resolved
+/// address in turn. When `port` is the default (i.e. no explicit port was in
+/// the URL), also tries port 443 as fallback — this handles Cloudflare Tunnel
+/// setups where TCP traffic enters through the HTTPS port.
+fn resolve_and_connect(host: &str, port: u16, explicit_port: bool, timeout: Duration) -> Result<TcpStream, WireError> {
     let host = host.to_owned();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send((host.as_str(), port).to_socket_addrs());
-    });
-    let mut addrs = rx
-        .recv_timeout(timeout)
-        .map_err(|_| WireError::BadAddress)?
-        .map_err(|_| WireError::BadAddress)?;
-    addrs.next().ok_or(WireError::BadAddress)
+    let mut ports = vec![port];
+    if !explicit_port && port != 443 {
+        ports.push(443);
+    }
+
+    // Resolve first port's addresses
+    let first_port = ports[0];
+    let addrs = {
+        let host_for_dns = host.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send((host_for_dns.as_str(), first_port).to_socket_addrs());
+        });
+        rx.recv_timeout(timeout)
+            .map_err(|_| WireError::BadAddress)?
+            .map_err(|_| WireError::BadAddress)?
+    };
+    let mut candidates: Vec<(std::net::SocketAddr, u16)> = addrs.map(|a| (a, first_port)).collect();
+
+    // Resolve fallback ports if any
+    for &fallback_port in &ports[1..] {
+        let host_for_dns = host.clone();
+        let (tx2, rx2) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx2.send((host_for_dns.as_str(), fallback_port).to_socket_addrs());
+        });
+        if let Ok(Ok(addrs)) = rx2.recv_timeout(timeout) {
+            for a in addrs {
+                candidates.push((a, fallback_port));
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return Err(WireError::BadAddress);
+    }
+
+    let mut last_err = None;
+    for (addr, _target_port) in &candidates {
+        match TcpStream::connect_timeout(addr, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last_err = Some(WireError::Io(e)),
+        }
+    }
+    Err(last_err.unwrap_or(WireError::BadAddress))
 }
 
 // ── Base TCP fetch ────────────────────────────────────────────────────
 
 fn send_tcp_with_timeout(request: Request, timeout: Duration) -> Result<Response, WireError> {
-    let addr = resolve_addr(request.url.host(), request.url.port_or_default(), timeout)?;
-    let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
+    let explicit_port = request.url.port().is_some();
+    let mut stream = resolve_and_connect(request.url.host(), request.url.port_or_default(), explicit_port, timeout)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     write_wire_request(&mut stream, &request)?;
@@ -985,8 +1063,8 @@ pub fn fetch_tcp_stream_with_timeout(
     timeout: Duration,
 ) -> Result<StreamConnection, WireError> {
     let request = Request::new(url.clone());
-    let addr = resolve_addr(request.url.host(), request.url.port_or_default(), timeout)?;
-    let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
+    let explicit_port = request.url.port().is_some();
+    let mut stream = resolve_and_connect(request.url.host(), request.url.port_or_default(), explicit_port, timeout)?;
     // Long read timeout for streaming; will be signalled by connection close
     stream.set_read_timeout(Some(Duration::from_secs(300)))?;
     stream.set_write_timeout(Some(timeout))?;
@@ -1001,8 +1079,8 @@ fn send_tcp_encrypted_with_timeout(
     config: &EncryptedTcpConfig,
     timeout: Duration,
 ) -> Result<Response, WireError> {
-    let addr = resolve_addr(request.url.host(), request.url.port_or_default(), timeout)?;
-    let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
+    let explicit_port = request.url.port().is_some();
+    let mut stream = resolve_and_connect(request.url.host(), request.url.port_or_default(), explicit_port, timeout)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     let request_bytes = wire_request_bytes(&request)?;
@@ -1266,9 +1344,23 @@ fn read_encrypted_frame(
     )?)
 }
 
+/// Read a JRG wire response (optionally wrapped in an HTTP response).
+///
+/// If the response starts with `HTTP/`, it is treated as an HTTP wrapper:
+/// the HTTP headers are parsed for Content-Length, and the body is re-parsed as a JRG response.
 pub fn read_response(reader: &mut impl Read) -> Result<Response, WireError> {
     let mut input = String::new();
     reader.read_to_string(&mut input)?;
+
+    // Check if this is an HTTP-wrapped response
+    if input.starts_with("HTTP/1.") || input.starts_with("HTTP/0.9") {
+        let (_http_headers, http_body) = input.split_once("\n\n").ok_or(WireError::BadResponse)?;
+        let http_body = http_body.trim_start_matches('\r');
+        // Re-parse the HTTP body as a JRG response
+        let mut jrg_reader = io::Cursor::new(http_body.as_bytes());
+        return read_response(&mut jrg_reader);
+    }
+
     let (headers, body) = input.split_once("\n\n").ok_or(WireError::BadResponse)?;
     let mut lines = headers.lines();
     let status_line = lines.next().ok_or(WireError::BadResponse)?;
