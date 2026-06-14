@@ -41,11 +41,13 @@ Owns the stable data model:
 - `Button`
 - `Input`
 - `Image`
-- `SearchEntry` / `SearchIndex`
+- `SearchEntry` / `SearchIndex` — local M5 prototype format
+- `IndexEntryV1` / `SearchIndexV1` — public jrgidx v1.0 exchange format
 - `PublicKeyring` / `SignatureStatus`
 - parser/serializer for the text-first page format
 - title/heading/link/metadata extraction for local search
 - tokenized local search, snippets, and prototype index text serialization
+- v1.0 jrgidx serialization with Ed25519 + encryption field validation
 - same-scheme page signature verification against public keyrings
 
 ### `jaringan-protocol`
@@ -86,13 +88,54 @@ Application shell:
 - persisted `.jrgidx` files and local GET `/search` result pages in the TUI
 - secure/not-secure indicator in the browser header
 
+### `jaringan-search` (M11)
+
+The public JRG search engine:
+
+- JRG server (`PageResolver`) with search, submit, status, verify endpoints
+- DNS TXT ownership verification at `_jrg-verify.<domain>`
+- jrgidx v1.0 fetch and validation (Ed25519 + encryption-capability format)
+- Aggregate `SearchIndexV1` of all submitted domains' pages
+- Background periodic re-index thread (default 6h, configurable)
+- On-disk persistence of submissions and index in `--data-dir`
+- Reads from the same `IndexEntryV1` / `SearchIndexV1` types in `jaringan-core`
+
+See `docs/spec/jrg-search.md` for the full submission protocol and jrgidx
+v1.0 format.
+
+### `jaringan-proxy`
+
+Tiny byte-forwarding reverse proxy that routes by `Host:` header. Sits in
+front of multiple Jaringan services on a single public port so external
+clients can reach each one on the same host. Protocol-agnostic: forwards
+both raw JRG and HTTP traffic unchanged. Backends do dual-protocol
+detection themselves.
+
+**Security model:** Only explicitly routed hosts can reach backends. Unknown
+hostnames are rejected by default. Error responses are generic — no backend
+addresses, ports, or diagnostics leak to the client. Request head sizes are
+capped; body forwarding is bounded.
+
+See `docs/spec/jrg-proxy.md` for the routing model and hardening details.
+
+### `jaringan-gateway`
+
+HTTP↔JRG bidirectional bridge:
+
+- `serve-http` — HTTP server that proxies each request to a JRG backend
+- `jrg-to-http` — JRG server that fetches an HTTP URL per request and
+  returns the body as JRG (used for reaching regular web pages through the
+  Jaringan browser)
+- renders JRG pages as semantic HTML for regular browsers
+
 ## Specs
 
 - `docs/spec/jrg-page-format.md`: `.jrg` block grammar, metadata delimiter, plain-text fallback rules.
 - `docs/spec/jrg-protocol.md`: `jrg://` URL semantics, strict `.jrg` path rules, status codes, response tags, local resolver behavior, TCP wire format, and encryption capability values.
 - `docs/spec/jrg-security.md`: same-scheme security model, public-keyring signatures, browser indicators.
 - `docs/spec/jrg-encryption.md`: XChaCha20-Poly1305 encrypted payload model, capability metadata, and encrypted TCP frame shape.
-- `docs/spec/jrg-search.md`: M5 local indexing fields, ranking weights, and prototype CLI output.
+- `docs/spec/jrg-search.md`: M11 public search engine — DNS-verified submission, jrgidx v1.0 exchange format, Ed25519 + encryption requirements, periodic re-indexing.
+- `docs/spec/jrg-proxy.md`: vhost reverse proxy — Host-header routing, byte forwarding, security model.
 
 ## Milestones
 
@@ -107,3 +150,4 @@ Application shell:
 9. **M8 action auth model:** add explicit `auth` capability tokens to side-effectful action buttons, carry them as `Action-Token` headers, and reject unauthorized demo POSTs before writing side effects.
 10. **M9 browser experience:** add rich renderable blocks (quotes, lists, rules, tables), improve plain/TUI rendering, and make the terminal browser more aesthetic with accent styling and aligned layouts.
 11. **M10 browser ergonomics:** add help overlay (`?`/`h`), forward history (`f`), page scrolling (`PgUp`/`PgDown`/`g`/`G`), selection shortcuts (`Home`/`End`), and polished key hints in footer and docs.
+12. **M11 public search engine:** add the `jaringan-search` and `jaringan-proxy` crates, DNS-verified domain submission, jrgidx v1.0 exchange format, Ed25519 + encryption requirements, background re-indexing, and the vhost reverse proxy that fans one public port to all services.

@@ -1,23 +1,54 @@
 # Search
 
-## Building an Index
+The Jaringan search engine lives at [search.simonharms.xyz](jrg://search.simonharms.xyz).
+It indexes public JRG pages whose owners have submitted their domains and
+proven ownership via DNS.
+
+## How to get indexed
+
+1. **Publish a jrgidx file** at `/.well-known/jrgidx` on your domain (see
+   the spec for the exact format).
+2. **Sign and encryption-cap every page** you list in that jrgidx.
+3. **Visit the submit page** and enter your domain.
+4. **Create a DNS TXT record** at `_jrg-verify.<your-domain>` with the
+   token the engine returns.
+5. **Click verify** — the engine checks DNS, fetches your jrgidx, and
+   indexes your pages.
+
+## Querying
+
+Connect with the Jaringan browser:
 
 ```
-jaringan-browser index ./my-site --output search.idx
+jaringan-browser open jrg://search.simonharms.xyz/
 ```
 
-## Searching
+Type a query, hit search. Results show the title, URL, and a relevance
+score. All indexed pages are signed, so you can trust the source.
+
+## Self-hosting
+
+The engine is a single Rust binary. Run it on any host, point a public
+hostname at it, and you're a search node:
+
+```bash
+jaringan-search serve --bind 127.0.0.1:7071 --data-dir /var/lib/jaringan-search
+```
+
+See `docs/spec/jrg-search.md` for the full spec and `docs/spec/jrg-proxy.md`
+for the vhost router that routes multiple services through a single port.
+
+## In-page search (local M5)
+
+Local `.jrg` files can also expose their own search form:
 
 ```
-jaringan-browser search ./my-site "query terms"
+? q label="Search query" value="action" placeholder="Search docs"
+! find label="Find" method="GET" target="/search"
 ```
 
-## In-Browser Search
-
-```
-? q label="Search" placeholder="Type here..."
-! search label="Search" method="POST" target="/actions/search" auth="demo-search"
-```
+When the browser opens this from a local file root, hitting `Find` searches
+that root and renders a result list. See `docs/examples/search-form.jrg`.
 
 ~~~
 title: Search

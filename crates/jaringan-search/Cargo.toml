@@ -1,0 +1,23 @@
+[package]
+name = "jaringan-search"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+jaringan-core = { path = "../jaringan-core" }
+jaringan-protocol = { path = "../jaringan-protocol" }
+anyhow = { workspace = true }
+base64 = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+ed25519-dalek = { workspace = true }
+hex = "0.4"
+rand = "0.8"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+hickory-resolver = "0.24"
+reqwest = { workspace = true, features = ["blocking"] }
+tokio = { workspace = true, features = ["full"] }
+url = { workspace = true }

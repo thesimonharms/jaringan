@@ -520,6 +520,122 @@ impl SearchIndex {
     }
 }
 
+// ---------------------------------------------------------------------------
+// V1.0 search index types (JRG-SEARCH/1.0 format with encryption metadata)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexEntryV1 {
+    pub url: String,
+    pub title: String,
+    pub public_key: String,
+    pub encryption: String,
+    pub signature: String,
+    pub last_modified: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchResultV1<'a> {
+    pub entry: &'a IndexEntryV1,
+    pub score: usize,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SearchIndexV1 {
+    entries: Vec<IndexEntryV1>,
+}
+
+impl SearchIndexV1 {
+    pub fn add(&mut self, entry: IndexEntryV1) {
+        self.entries.push(entry);
+    }
+
+    pub fn entries(&self) -> &[IndexEntryV1] {
+        &self.entries
+    }
+
+    pub fn search(&self, query: &str) -> Vec<SearchResultV1<'_>> {
+        let tokens = query_tokens(query);
+        if tokens.is_empty() {
+            return Vec::new();
+        }
+        let mut results = self
+            .entries
+            .iter()
+            .filter_map(|entry| score_entry_v1(entry, &tokens))
+            .collect::<Vec<_>>();
+        results.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.entry.title.cmp(&right.entry.title))
+                .then_with(|| left.entry.url.cmp(&right.entry.url))
+        });
+        results
+    }
+
+    pub fn to_index_text_v1(&self) -> String {
+        let mut output = String::from("JRG-SEARCH/1.0\n");
+        for entry in &self.entries {
+            output.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\n",
+                escape_index_field(&entry.url),
+                escape_index_field(&entry.title),
+                escape_index_field(&entry.public_key),
+                escape_index_field(&entry.encryption),
+                escape_index_field(&entry.signature),
+                escape_index_field(&entry.last_modified),
+            ));
+        }
+        output
+    }
+
+    pub fn from_index_text_v1(input: &str) -> Result<Self, String> {
+        let mut lines = input.lines();
+        match lines.next() {
+            Some("JRG-SEARCH/1.0") => {}
+            Some(other) => return Err(format!("unsupported search index header: {other}")),
+            None => return Err(String::from("empty search index")),
+        }
+
+        let mut index = SearchIndexV1::default();
+        for (line_number, line) in lines.enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields = line.split('\t').collect::<Vec<_>>();
+            if fields.len() != 6 {
+                return Err(format!(
+                    "bad search index entry at line {}: expected 6 fields",
+                    line_number + 2
+                ));
+            }
+            index.add(IndexEntryV1 {
+                url: unescape_index_field(fields[0])?,
+                title: unescape_index_field(fields[1])?,
+                public_key: unescape_index_field(fields[2])?,
+                encryption: unescape_index_field(fields[3])?,
+                signature: unescape_index_field(fields[4])?,
+                last_modified: unescape_index_field(fields[5])?,
+            });
+        }
+        Ok(index)
+    }
+}
+
+fn score_entry_v1<'a>(entry: &'a IndexEntryV1, tokens: &[String]) -> Option<SearchResultV1<'a>> {
+    let mut score = 0;
+    let mut snippet = None;
+    score += score_field(&entry.title, tokens, 10, &mut snippet);
+    score += score_field(&entry.url, tokens, 5, &mut snippet);
+    (score > 0).then(|| SearchResultV1 {
+        entry,
+        score,
+        snippet: snippet.unwrap_or_else(|| entry.title.clone()),
+    })
+}
+
 fn score_entry<'a>(entry: &'a SearchEntry, tokens: &[String]) -> Option<SearchResult<'a>> {
     let mut score = 0;
     let mut snippet = None;
@@ -1504,5 +1620,73 @@ mod tests {
         let source = "# With Script\n\n~> My Transform\n(module\n  (memory (export \"memory\") 2)\n  (func (export \"process\") (param i32 i32) (result i32)\n    local.get 0\n  )\n)\n~<\n";
         let doc = parse_document(source).unwrap();
         assert!(doc.blocks.iter().any(|b| matches!(b, Block::Script { .. })));
+    }
+
+    // -----------------------------------------------------------------------
+    // V1.0 search index tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn index_v1_round_trip() {
+        let mut index = SearchIndexV1::default();
+        index.add(IndexEntryV1 {
+            url: "jrg://example.com/page.jrg".into(),
+            title: "My Page".into(),
+            public_key: "ed25519:ABCD...".into(),
+            encryption: "xchacha20poly1305;key-id=key1".into(),
+            signature: "ed25519:SIG...".into(),
+            last_modified: "2026-06-14T12:00:00Z".into(),
+        });
+        index.add(IndexEntryV1 {
+            url: "jrg://example.com/other.jrg".into(),
+            title: "Other".into(),
+            public_key: "ed25519:EFGH...".into(),
+            encryption: String::new(),
+            signature: "ed25519:SIG2...".into(),
+            last_modified: "2026-06-15T08:00:00Z".into(),
+        });
+
+        let encoded = index.to_index_text_v1();
+        let decoded = SearchIndexV1::from_index_text_v1(&encoded).unwrap();
+
+        assert_eq!(decoded.entries(), index.entries());
+    }
+
+    #[test]
+    fn index_v1_rejects_bad_header() {
+        let result = SearchIndexV1::from_index_text_v1("JRG-SEARCH/0.1\n");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unsupported"));
+
+        let result = SearchIndexV1::from_index_text_v1("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn index_v1_search_returns_matching() {
+        let mut index = SearchIndexV1::default();
+        index.add(IndexEntryV1 {
+            url: "jrg://example.com/laksa.jrg".into(),
+            title: "Penang Laksa Guide".into(),
+            public_key: String::new(),
+            encryption: String::new(),
+            signature: String::new(),
+            last_modified: String::new(),
+        });
+        index.add(IndexEntryV1 {
+            url: "jrg://example.com/coffee.jrg".into(),
+            title: "Coffee".into(),
+            public_key: String::new(),
+            encryption: String::new(),
+            signature: String::new(),
+            last_modified: String::new(),
+        });
+
+        let results = index.search("laksa");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry.title, "Penang Laksa Guide");
+        assert!(results[0].score > 0);
     }
 }

@@ -1,0 +1,32 @@
+[Unit]
+Description=JRG vhost reverse proxy (port 7070)
+Documentation=https://github.com/thesimonharms/jaringan/docs/spec/jrg-proxy.md
+After=network.target jaringan-search.service jaringan-demo-server.service
+Requires=jaringan-search.service
+
+[Service]
+Type=simple
+ExecStart=/home/lekmon/jaringan-demo/jaringan-proxy \
+    --bind 0.0.0.0:7070 \
+    --routes search.simonharms.xyz=127.0.0.1:7071,jrg.simonharms.xyz=127.0.0.1:7072 \
+    --timeout 30 \
+    --max-head-size 65536
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectClock=yes
+RestrictRealtime=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=default.target

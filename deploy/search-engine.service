@@ -1,0 +1,20 @@
+[Unit]
+Description=JRG Search Engine (M11)
+Documentation=https://github.com/thesimonharms/jaringan/docs/spec/jrg-search.md
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/lekmon/jaringan-demo/jaringan-search serve \
+    --bind 127.0.0.1:7071 \
+    --data-dir /home/lekmon/jaringan-demo/search-data \
+    --domain search.simonharms.xyz \
+    --reindex-hours 6
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

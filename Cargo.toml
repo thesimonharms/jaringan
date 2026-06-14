@@ -7,9 +7,11 @@ members = [
     "crates/jaringan-gateway",
     "crates/jaringan-plugins",
     "crates/jaringan-protocol",
+    "crates/jaringan-proxy",
     "crates/jaringan-render",
     "crates/jaringan-script",
     "crates/jaringan-script-sdk",
+    "crates/jaringan-search",
 ]
 resolver = "3"
 
