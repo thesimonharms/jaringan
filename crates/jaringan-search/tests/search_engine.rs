@@ -140,3 +140,110 @@ fn validate_entry_rejects_wrong_length_keys() {
     };
     assert!(!validate_entry(&entry_bad_sig), "should reject empty signature");
 }
+
+#[test]
+fn test_verify_page_signature_crypto() {
+    use ed25519_dalek::{Signer, SigningKey};
+    use jaringan_core::IndexEntryV1;
+    use jaringan_search::engine::verify_page_signature;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    use base64::Engine;
+    use rand::Rng;
+
+    // 1. Generate an Ed25519 keypair
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill(&mut seed);
+    let signing_key = SigningKey::from_bytes(&seed);
+    let verifying_key = signing_key.verifying_key();
+    let pk_base64 = base64::engine::general_purpose::STANDARD.encode(verifying_key.as_bytes());
+
+    // 2. Build the page body (without signature) and sign it
+    let signer_name = "test-signer";
+    let page_body = "# Test Page\n\nThis is a signed page.\n\n=> jrg://example.com/ Home";
+    // The canonical payload for signing uses ~~~~~ as metadata separator
+    // canonical_signature_payload produces: "{body}~~~~~\n{metadata_without_signature}\n"
+    let metadata_without_sig = format!("signed-by: {signer_name}");
+    let canonical_payload = format!("{page_body}~~~~~\n{metadata_without_sig}\n");
+    let signature = signing_key.sign(canonical_payload.as_bytes());
+    let sig_base64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
+
+    // Full page text including the signature in metadata
+    let page_text = format!(
+        "{page_body}~~~~~\nsigned-by: {signer_name}\nsignature: ed25519:{sig_base64}\n"
+    );
+
+    // 3. Start a simple HTTP server to serve the page
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let page_text_clone = page_text.clone();
+
+    let _server = thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut s) => {
+                    let mut buf = [0u8; 4096];
+                    let _ = s.read(&mut buf);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        page_text_clone.len(),
+                        page_text_clone
+                    );
+                    let _ = s.write_all(response.as_bytes());
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Give the server a moment
+    thread::sleep(std::time::Duration::from_millis(100));
+
+    // 4. Create an IndexEntryV1 with the CORRECT public key
+    let valid_entry = IndexEntryV1 {
+        url: format!("jrg://127.0.0.1:{port}/test.jrg"),
+        title: "Test Page".into(),
+        public_key: format!("ed25519:{pk_base64}"),
+        encryption: "xchacha20poly1305;key-id=k1".into(),
+        signature: "ed25519:".to_owned() + &"A".repeat(86),
+        last_modified: "2026-01-01T00:00:00Z".into(),
+    };
+
+    // 5. verify_page_signature should succeed with the correct key
+    let result = verify_page_signature(&valid_entry);
+    assert!(
+        result.is_ok(),
+        "verify_page_signature should succeed with correct public key. Got: {:?}",
+        result
+    );
+    println!("✓ verify_page_signature succeeds with correct public key");
+
+    // 6. Create an IndexEntryV1 with a WRONG public key
+    let mut wrong_seed = [0u8; 32];
+    rand::thread_rng().fill(&mut wrong_seed);
+    let wrong_key = SigningKey::from_bytes(&wrong_seed);
+    let wrong_pk_b64 =
+        base64::engine::general_purpose::STANDARD.encode(wrong_key.verifying_key().as_bytes());
+
+    let invalid_entry = IndexEntryV1 {
+        url: format!("jrg://127.0.0.1:{port}/test.jrg"),
+        title: "Test Page".into(),
+        public_key: format!("ed25519:{wrong_pk_b64}"),
+        encryption: "xchacha20poly1305;key-id=k1".into(),
+        signature: "ed25519:".to_owned() + &"A".repeat(86),
+        last_modified: "2026-01-01T00:00:00Z".into(),
+    };
+
+    // 7. verify_page_signature should fail with a different public key
+    let result = verify_page_signature(&invalid_entry);
+    assert!(
+        result.is_err(),
+        "verify_page_signature should fail with wrong public key"
+    );
+    println!(
+        "✓ verify_page_signature rejects wrong public key: {}",
+        result.unwrap_err()
+    );
+}

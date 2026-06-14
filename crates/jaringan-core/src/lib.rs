@@ -300,11 +300,11 @@ pub fn canonical_signature_payload(source: &str) -> String {
     format!("{body}~~~~~\n{}\n", metadata_without_signature.trim())
 }
 
-fn source_metadata(source: &str) -> Option<&str> {
+pub fn source_metadata(source: &str) -> Option<&str> {
     source.split_once("~~~~~").map(|(_, metadata)| metadata)
 }
 
-fn metadata_value<'a>(metadata: &'a str, key: &str) -> Option<&'a str> {
+pub fn metadata_value<'a>(metadata: &'a str, key: &str) -> Option<&'a str> {
     metadata.lines().find_map(|line| {
         let (candidate, value) = line.split_once(':')?;
         candidate

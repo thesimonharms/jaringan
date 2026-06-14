@@ -5,7 +5,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use jaringan_core::{IndexEntryV1, SearchIndexV1};
+use jaringan_core::{IndexEntryV1, SearchIndexV1, PublicKeyring, SignatureStatus,
+    verify_source_signature, source_metadata, metadata_value};
 
 use base64::Engine;
 
@@ -297,12 +298,14 @@ impl PageResolver for SearchEngine {
                             // DNS verified — now fetch and index the jrgidx
                             match fetch_remote_jrgidx(&domain) {
                                 Ok(entries) => {
-                                    // Validate entries
+                                    // Validate entries (format + crypto)
                                     let total = entries.len();
-                                    let valid: Vec<IndexEntryV1> = entries
-                                        .into_iter()
-                                        .filter(|e| validate_entry(e))
-                                        .collect();
+                                    let mut valid = Vec::new();
+                                    for entry in entries {
+                                        if validate_entry(&entry) && verify_page_signature(&entry).is_ok() {
+                                            valid.push(entry);
+                                        }
+                                    }
                                     let page_count = valid.len();
                                     let skip_count = total - page_count;
 
@@ -496,6 +499,58 @@ pub fn validate_entry(entry: &IndexEntryV1) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Cryptographic page signature verification
+// ---------------------------------------------------------------------------
+
+/// Convert a jrg:// URL to an https:// URL for fetching
+fn jrg_to_http_url(jrg_url: &str) -> Result<String, String> {
+    let without_scheme = jrg_url.strip_prefix("jrg://")
+        .ok_or_else(|| format!("not a jrg:// URL: {jrg_url}"))?;
+
+    // Use HTTP for localhost (for testing), HTTPS otherwise
+    if without_scheme.starts_with("127.0.0.1") || without_scheme.starts_with("localhost") {
+        Ok(format!("http://{without_scheme}"))
+    } else {
+        Ok(format!("https://{without_scheme}"))
+    }
+}
+
+/// Fetch and cryptographically verify a page's signature against the
+/// public key declared in its jrgidx entry.
+///
+/// Returns Ok(()) if the page has a valid Ed25519 signature that verifies
+/// against the declared public key. Returns Err(reason) otherwise.
+pub fn verify_page_signature(entry: &IndexEntryV1) -> Result<(), String> {
+    // 1. Convert jrg:// URL to an HTTP URL we can fetch
+    let http_url = jrg_to_http_url(&entry.url)?;
+
+    // 2. Fetch the page text
+    let page_text = fetch_url_text(&http_url)?;
+
+    // 3. Extract the signer name from the page's `signed-by:` metadata
+    let metadata = source_metadata(&page_text)
+        .ok_or_else(|| "page has no metadata section (no ~~~ delimiters)".to_string())?;
+    let signer_name = metadata_value(metadata, "signed-by")
+        .ok_or_else(|| "page has no signed-by: metadata".to_string())?;
+    let _page_sig = metadata_value(metadata, "signature")
+        .ok_or_else(|| "page has signed-by but no signature: metadata".to_string())?;
+
+    // 4. Build a PublicKeyring with the key from the jrgidx entry
+    let pk_b64 = entry.public_key.strip_prefix("ed25519:").unwrap_or("");
+    let mut keyring = PublicKeyring::default();
+    keyring.add_ed25519_key(signer_name, pk_b64)
+        .map_err(|e| format!("invalid public key for {}: {}", entry.url, e))?;
+
+    // 5. Verify
+    match verify_source_signature(&page_text, &keyring) {
+        SignatureStatus::Secure { .. } => Ok(()),
+        SignatureStatus::Unsigned => Err("page is unsigned (no valid signed-by/signature)".into()),
+        SignatureStatus::UnknownSigner { .. } => Err("signer key not in declared keyring".into()),
+        SignatureStatus::Invalid { reason } => Err(format!("signature invalid: {reason}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Periodic re-indexing
 // ---------------------------------------------------------------------------
 
@@ -537,7 +592,7 @@ pub fn start_periodic_reindex(engine: &'_ SearchEngine) {
                 Ok(entries) => {
                     let valid: Vec<IndexEntryV1> = entries
                         .into_iter()
-                        .filter(|e| validate_entry(e))
+                        .filter(|e| validate_entry(e) && verify_page_signature(e).is_ok())
                         .collect();
                     eprintln!("🔄   {domain}: {} valid entries", valid.len());
                     for entry in valid {
