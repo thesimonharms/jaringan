@@ -18,3 +18,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+jaringan-search = { path = "../jaringan-search" }
+tempfile = "3.23"
