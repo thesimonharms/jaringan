@@ -1,5 +1,5 @@
 [Unit]
-Description=JRG Search Engine (M11)
+Description=JRG Search Engine
 Documentation=https://github.com/thesimonharms/jaringan/docs/spec/jrg-search.md
 After=network.target
 
@@ -14,7 +14,13 @@ Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-NoNewPrivileges=true
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_INET AF_INET6
+ReadWritePaths=/home/lekmon/jaringan-demo/search-data
 
 [Install]
 WantedBy=default.target

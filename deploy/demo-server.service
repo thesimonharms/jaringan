@@ -1,0 +1,20 @@
+[Unit]
+Description=Jaringan TCP JRG Server (Demo)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/lekmon/jaringan-demo/jaringan-server serve /home/lekmon/jaringan-demo/pages --bind 127.0.0.1:7072
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target

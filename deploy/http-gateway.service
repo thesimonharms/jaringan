@@ -1,0 +1,21 @@
+[Unit]
+Description=Jaringan HTTP→JRG Gateway (Demo)
+After=network.target jaringan-demo-server.service
+Requires=jaringan-demo-server.service
+
+[Service]
+Type=simple
+ExecStart=/home/lekmon/jaringan-demo/jaringan-gateway serve-http --http-listen 127.0.0.1:18080 --jrg-host 127.0.0.1:7072
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target

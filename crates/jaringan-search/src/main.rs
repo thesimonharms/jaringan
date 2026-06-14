@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
 
             // Start periodic re-indexing if enabled
             if reindex_hours > 0 {
-                engine::start_periodic_reindex(&engine);
+                engine::start_periodic_reindex(engine.clone());
             }
 
             let listener = std::net::TcpListener::bind(&bind)

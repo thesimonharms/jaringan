@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -556,29 +556,18 @@ pub fn verify_page_signature(entry: &IndexEntryV1) -> Result<(), String> {
 
 /// Start a background thread that re-indexes verified domains every N hours.
 /// The interval defaults to 6 hours.
-pub fn start_periodic_reindex(engine: &'_ SearchEngine) {
-    let data_dir = engine.data_dir.clone();
+pub fn start_periodic_reindex(engine: Arc<SearchEngine>) {
     let interval_hours = 6;
     let interval = Duration::from_secs(interval_hours * 3600);
 
-    // We use a separate index file for the re-index thread
+    let engine_for_thread = engine.clone();
     std::thread::spawn(move || loop {
         std::thread::sleep(interval);
 
         eprintln!("🔄 Periodic re-index starting...");
 
-        // Load current verified domains from disk (share via file)
-        let mut current_domains = Vec::new();
-        let subs_path = data_dir.join("submissions.json");
-        if let Ok(text) = std::fs::read_to_string(&subs_path) {
-            if let Ok(subs) = serde_json::from_str::<HashMap<String, Submission>>(&text) {
-                current_domains = subs
-                    .into_values()
-                    .filter(|s| s.verified)
-                    .map(|s| s.domain)
-                    .collect();
-            }
-        }
+        // Read verified domains from the engine's in-memory state
+        let current_domains = engine_for_thread.verified_domains();
 
         if current_domains.is_empty() {
             eprintln!("🔄 No verified domains to re-index");
@@ -605,14 +594,18 @@ pub fn start_periodic_reindex(engine: &'_ SearchEngine) {
             }
         }
 
-        // Write updated index
-        let mut index = SearchIndexV1::default();
-        for entry in all_entries {
-            index.add(entry);
+        // Update in-memory index
+        {
+            let mut new_index = SearchIndexV1::default();
+            for entry in all_entries {
+                new_index.add(entry);
+            }
+            eprintln!("🔄 Periodic re-index complete: {} total pages", new_index.entries().len());
+            *engine_for_thread.index.lock().unwrap() = new_index;
         }
-        let index_text = index.to_index_text_v1();
-        let _ = std::fs::write(data_dir.join("index.jrgidx"), index_text);
-        eprintln!("🔄 Periodic re-index complete: {} total pages", index.entries().len());
+
+        // Persist to disk
+        engine_for_thread.save_state();
     });
 }
 
