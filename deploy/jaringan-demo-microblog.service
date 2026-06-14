@@ -1,0 +1,14 @@
+[Unit]
+Description=Jaringan Microblog Demo
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/lekmon/jaringan-demo/jaringan-demo-microblog 7072
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

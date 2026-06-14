@@ -685,7 +685,7 @@ const MAX_CONCURRENT: usize = 256;
 pub fn serve(listener: TcpListener, resolver: impl PageResolver) -> Result<(), WireError> {
     let active = std::sync::atomic::AtomicUsize::new(0);
     for stream in listener.incoming() {
-        let mut stream = match stream {
+        let stream = match stream {
             Ok(s) => s,
             Err(_) => continue,
         };

@@ -1,1 +1,141 @@
-jrg-proxy.md
+# Jaringan Vhost Reverse Proxy 0.1
+
+The proxy is a byte-forwarding TCP router that fans a single public port out to
+many backends, choosing a backend by the request's `Host:` header. It exists so
+multiple Jaringan services can share one public port without requiring each
+service to implement its own virtual-host logic.
+
+## Why it exists
+
+Multiple Jaringan services (a search engine, a content server, a gateway) need
+to be available to external clients on the same host. Instead of opening one
+port per service, the proxy listens on a single address and dispatches each
+connection to the correct backend based on the hostname the client requested.
+
+The proxy is protocol-agnostic: it forwards bytes verbatim and only inspects
+the `Host:` header. Upstream services do their own protocol detection (raw JRG
+vs HTTP).
+
+## Architecture
+
+```text
+Public :7070  →  jaringan-proxy  ─┬─ search.example.com  → 127.0.0.1:7071 (jaringan-search)
+                                  ├─ jrg.example.com     → 127.0.0.1:7072 (jaringan-demo)
+                                  └─ *                   → 127.0.0.1:7072 (if allow_unknown)
+```
+
+The proxy runs on a public-facing address (e.g. `0.0.0.0:7070`); the backends
+run on loopback only. Only the proxy is reachable from the outside.
+
+## Wire behavior
+
+For every accepted connection the proxy:
+
+1. Reads the request head line-by-line until a blank line, with a
+   **configurable size limit** (default 64 KB). Requests exceeding this
+   receive a 413 `Payload Too Large` and close.
+2. Parses the `Host:` header. The value is lowercased; any `:port` suffix is
+   stripped before matching.
+3. Looks up the host in the route map. If no match:
+   - With `--allow-unknown`: falls through to the default backend.
+   - Without `--allow-unknown` (default): responds with 503 `Service
+     Unavailable` and closes — no default routing.
+4. Opens a TCP connection to the chosen backend.
+5. Forwards the request head plus any body bytes already buffered.
+6. If `Content-Length` is present and larger than the buffered body, copies
+   the remaining body bytes (capped at `4 × max_head_size` to prevent
+   resource exhaustion).
+7. Calls `shutdown(upstream, Write)` so the backend sees EOF.
+8. Reads the upstream's full response (Content-Length-aware) and writes it
+   back to the client.
+
+The proxy never inspects the request method, path, body, or response status.
+It is, by design, a dumb pipe with a routing table.
+
+## Security model
+
+- **Only routed hosts get backend access.** Without `--allow-unknown`, unknown
+  hostnames are rejected. This means only domains explicitly configured as
+  routes can reach internal services.
+- **Error responses are generic.** The proxy returns `Bad Gateway` or
+  `Service Unavailable` with no backend addresses, ports, or error details
+  in the response body. All diagnostics go to the server's stderr.
+- **Request head size is capped** at `--max-head-size` (default 64 KB). A
+  single slow or oversized request cannot exhaust memory.
+- **Body forwarding is capped** at `4 × max_head_size` to prevent a
+  malicious `Content-Length` from draining resources.
+- **Connection timeouts** apply to both the client and upstream sides. A
+  stuck client cannot hold a backend connection open indefinitely.
+- **Writes are shut down after the request body** so backends receive EOF
+  and can produce their response immediately.
+
+## CLI
+
+```bash
+jaringan-proxy \
+    --bind 0.0.0.0:7070 \
+    --routes search.example.com=127.0.0.1:7071,jrg.example.com=127.0.0.1:7072 \
+    --timeout 30 \
+    --max-head-size 65536
+```
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--bind` | `0.0.0.0:7070` | Listening address |
+| `--routes` | (none) | Comma-separated `host=addr` pairs |
+| `--allow-unknown` | `false` | If true, unknown hosts fall through to `--default` |
+| `--default` | `127.0.0.1:7072` | Backend for unmatched hosts (only with `--allow-unknown`) |
+| `--timeout` | `30` | Per-connection read/write timeout in seconds |
+| `--max-head-size` | `65536` | Maximum request head size in bytes |
+
+With no `--routes` and `--allow-unknown=false` (the default), all requests are
+rejected. This is intentional: the proxy ships locked-down by default.
+
+## Deployment example
+
+A typical self-hosted setup with two services behind the proxy:
+
+```bash
+# Start backends on loopback
+jaringan-search serve --bind 127.0.0.1:7071 --data-dir /var/lib/jrg-search --domain search.example.com
+jaringan-browser serve /srv/jrg-pages --bind 127.0.0.1:7072
+
+# Start the proxy on the public port
+jaringan-proxy \
+    --bind 0.0.0.0:7070 \
+    --routes search.example.com=127.0.0.1:7071,jrg.example.com=127.0.0.1:7072
+```
+
+External clients connect to `search.example.com:7070` and `jrg.example.com:7070`.
+The proxy routes by `Host:` header; the backends handle the protocol.
+
+## Failure modes
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `HTTP/1.1 503 Service Unavailable` | Unknown host (no matching route and `--allow-unknown` is off) | Add the host to `--routes` or enable `--allow-unknown` |
+| `HTTP/1.1 502 Bad Gateway` | Backend port not listening | Start the backend; check the route address |
+| `HTTP/1.1 413 Payload Too Large` | Request head exceeds `--max-head-size` | Increase the limit or send smaller requests |
+| Connection hangs | Forgot `upstream.shutdown(Write)` in a fork | Check the proxy version; this is regression-tested |
+| Wrong backend responds | Hostname typo or case mismatch | Hosts are lowercased on parse and lookup; verify the route config |
+| Body truncated | Mismatched `Content-Length` | Proxy honors `Content-Length` strictly; backend must set it correctly |
+| Connection refused | Proxy not bound to the right address | Verify with `ss -tlnp` |
+
+## What the proxy is not
+
+- **Not a load balancer.** It picks one backend per host; round-robin or
+  health-checking would need additional work.
+- **Not a TLS terminator.** TLS is handled by the upstream infrastructure
+  or by direct clients speaking their own transport encryption.
+- **Not an HTTP/2 multiplexer.** It opens one TCP connection per request.
+- **Not a firewall.** It trusts the `Host:` header the client sends. Add
+  network-layer ACLs for defense in depth.
+
+## See also
+
+=> spec/jrg-protocol.jrg JRG Protocol Specification — the wire format the proxy forwards
+=> spec/jrg-search.jrg JRG Search Specification — one of the typical backends behind the proxy
+
+~~~
+title: Jaringan Vhost Reverse Proxy 0.1
+tags: spec, proxy, routing
