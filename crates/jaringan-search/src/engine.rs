@@ -34,6 +34,7 @@ pub struct SearchEngine {
     pub port: u16,
     pub index: Mutex<SearchIndexV1>,
     pub submissions: Mutex<HashMap<String, Submission>>,
+    pub snippets: Mutex<HashMap<String, String>>,
 }
 
 impl SearchEngine {
@@ -47,6 +48,7 @@ impl SearchEngine {
             port,
             index: Mutex::new(index),
             submissions: Mutex::new(submissions),
+            snippets: Mutex::new(HashMap::new()),
         }
     }
 
@@ -154,6 +156,25 @@ impl SearchEngine {
             .filter(|s| s.verified)
             .map(|s| s.domain.clone())
             .collect()
+    }
+
+    /// Remove a pending (unverified) submission
+    pub fn purge_domain(&self, domain: &str) -> bool {
+        let removed = {
+            let mut subs = self.submissions.lock().unwrap();
+            subs.remove(domain).is_some()
+        };
+        if removed {
+            self.save_state();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Store a text snippet for a verified page URL
+    pub fn store_snippet(&self, url: &str, snippet: String) {
+        self.snippets.lock().unwrap().insert(url.to_string(), snippet);
     }
 }
 
@@ -302,8 +323,14 @@ impl PageResolver for SearchEngine {
                                     let total = entries.len();
                                     let mut valid = Vec::new();
                                     for entry in entries {
-                                        if validate_entry(&entry) && verify_page_signature(&entry).is_ok() {
-                                            valid.push(entry);
+                                        if validate_entry(&entry) {
+                                            match verify_page_signature(&entry) {
+                                                Ok(snippet) => {
+                                                    self.store_snippet(&entry.url, snippet);
+                                                    valid.push(entry);
+                                                }
+                                                Err(_) => {}
+                                            }
                                         }
                                     }
                                     let page_count = valid.len();
@@ -352,7 +379,37 @@ impl PageResolver for SearchEngine {
                 self.render_search_results(q)
             }
 
-            _ => Ok(Response::page(StatusCode::NotFound, pages::not_found_page())),
+            // POST /actions/purge — Remove a pending submission
+            (RequestMethod::Post, "/actions/purge") => {
+                let domain = parse_form_value(&request.body, "domain")
+                    .unwrap_or("")
+                    .trim()
+                    .to_lowercase();
+
+                if domain.is_empty() {
+                    return Ok(Response::page(
+                        StatusCode::Ok,
+                        pages::error_page("No domain specified. Use `domain=example.com` to purge a submission."),
+                    ));
+                }
+
+                if self.purge_domain(&domain) {
+                    let page = format!(
+                        "# ✅ Submission Purged\n\n**{domain}** has been removed from the submission queue.\n\n=> /submit.jrg Submit a new domain\n=> /status.jrg View Index Status\n\n~~~\ntitle: Submission Purged\n~~~"
+                    );
+                    Ok(Response::page(StatusCode::Ok, page))
+                } else {
+                    Ok(Response::page(
+                        StatusCode::Ok,
+                        pages::error_page(&format!("No pending submission found for **{domain}**.")),
+                    ))
+                }
+            }
+
+            _ => Ok(Response::page(
+                StatusCode::NotFound,
+                pages::not_found_page(),
+            )),
         }
     }
 }
@@ -377,13 +434,16 @@ impl SearchEngine {
 
             for (i, result) in results.iter().enumerate() {
                 let entry = result.entry;
+                let snippet = match self.snippets.lock().unwrap().get(&entry.url) {
+                    Some(s) if !s.is_empty() => s.clone(),
+                    _ => entry.title.clone(),
+                };
                 body.push_str(&format!(
-                    "### {}. **{}**\n\n=> {} Click to visit\n\n_Score: {} — {}_\n\n---\n\n",
+                    "### {}. **{}**\n\n=> {} Click to visit\n\n_{}_\n\n---\n\n",
                     i + 1,
                     entry.title,
                     entry.url,
-                    result.score,
-                    result.snippet,
+                    snippet,
                 ));
             }
 
@@ -518,16 +578,20 @@ fn jrg_to_http_url(jrg_url: &str) -> Result<String, String> {
 /// Fetch and cryptographically verify a page's signature against the
 /// public key declared in its jrgidx entry.
 ///
-/// Returns Ok(()) if the page has a valid Ed25519 signature that verifies
-/// against the declared public key. Returns Err(reason) otherwise.
-pub fn verify_page_signature(entry: &IndexEntryV1) -> Result<(), String> {
+/// Returns Ok(snippet) if the page has a valid Ed25519 signature that verifies
+/// against the declared public key, along with a text snippet from the page body.
+/// Returns Err(reason) otherwise.
+pub fn verify_page_signature(entry: &IndexEntryV1) -> Result<String, String> {
     // 1. Convert jrg:// URL to an HTTP URL we can fetch
     let http_url = jrg_to_http_url(&entry.url)?;
 
     // 2. Fetch the page text
     let page_text = fetch_url_text(&http_url)?;
 
-    // 3. Extract the signer name from the page's `signed-by:` metadata
+    // 3. Extract snippet from page body (before metadata)
+    let snippet = extract_snippet(&page_text);
+
+    // 4. Extract the signer name from the page's `signed-by:` metadata
     let metadata = source_metadata(&page_text)
         .ok_or_else(|| "page has no metadata section (no ~~~ delimiters)".to_string())?;
     let signer_name = metadata_value(metadata, "signed-by")
@@ -535,19 +599,60 @@ pub fn verify_page_signature(entry: &IndexEntryV1) -> Result<(), String> {
     let _page_sig = metadata_value(metadata, "signature")
         .ok_or_else(|| "page has signed-by but no signature: metadata".to_string())?;
 
-    // 4. Build a PublicKeyring with the key from the jrgidx entry
+    // 5. Build a PublicKeyring with the key from the jrgidx entry
     let pk_b64 = entry.public_key.strip_prefix("ed25519:").unwrap_or("");
     let mut keyring = PublicKeyring::default();
-    keyring.add_ed25519_key(signer_name, pk_b64)
+    keyring
+        .add_ed25519_key(signer_name, pk_b64)
         .map_err(|e| format!("invalid public key for {}: {}", entry.url, e))?;
 
-    // 5. Verify
+    // 6. Verify
     match verify_source_signature(&page_text, &keyring) {
-        SignatureStatus::Secure { .. } => Ok(()),
+        SignatureStatus::Secure { .. } => Ok(snippet),
         SignatureStatus::Unsigned => Err("page is unsigned (no valid signed-by/signature)".into()),
         SignatureStatus::UnknownSigner { .. } => Err("signer key not in declared keyring".into()),
         SignatureStatus::Invalid { reason } => Err(format!("signature invalid: {reason}")),
     }
+}
+
+/// Extract a readable snippet from a JRG page body (before metadata).
+/// Takes the first non-heading, non-link, non-empty paragraph.
+fn extract_snippet(page_text: &str) -> String {
+    // Strip metadata section (everything after ~~~~~)
+    let body = page_text.split("\n~~~~~\n").next().unwrap_or(page_text);
+
+    // Find first substantial paragraph
+    for line in body.lines() {
+        let trimmed = line.trim();
+        // Skip empty lines, headings, links, buttons, inputs, rules, code fences, lists
+        if trimmed.is_empty()
+            || trimmed.starts_with('#')
+            || trimmed.starts_with("=>")
+            || trimmed.starts_with('!')
+            || trimmed.starts_with('?')
+            || trimmed.starts_with("---")
+            || trimmed.starts_with("```")
+            || trimmed.starts_with('-')
+            || trimmed.starts_with('*')
+            || trimmed.starts_with('|')
+            || trimmed.starts_with('>')
+            || trimmed.starts_with('@')
+        {
+            continue;
+        }
+        if trimmed.len() > 20 {
+            // Truncate to ~150 chars with ellipsis
+            if trimmed.len() > 150 {
+                let mut s = trimmed[..147].to_string();
+                s.push_str("...");
+                return s;
+            }
+            return trimmed.to_string();
+        }
+    }
+
+    // Fall back to empty snippet
+    String::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -579,10 +684,18 @@ pub fn start_periodic_reindex(engine: Arc<SearchEngine>) {
             eprintln!("🔄 Re-indexing {domain}...");
             match fetch_remote_jrgidx(domain) {
                 Ok(entries) => {
-                    let valid: Vec<IndexEntryV1> = entries
-                        .into_iter()
-                        .filter(|e| validate_entry(e) && verify_page_signature(e).is_ok())
-                        .collect();
+                    let mut valid = Vec::new();
+                    for entry in entries {
+                        if validate_entry(&entry) {
+                            match verify_page_signature(&entry) {
+                                Ok(snippet) => {
+                                    engine_for_thread.store_snippet(&entry.url, snippet);
+                                    valid.push(entry);
+                                }
+                                Err(_) => {}
+                            }
+                        }
+                    }
                     eprintln!("🔄   {domain}: {} valid entries", valid.len());
                     for entry in valid {
                         all_entries.push(entry);

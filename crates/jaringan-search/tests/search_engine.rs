@@ -110,7 +110,73 @@ fn test_search_engine_endpoints() {
     assert!(verify_form.contains("Verify"), "Verify page should mention Verify");
     println!("✓ GET /actions/verify - Shows verify form");
 
-    println!("\n✅ All 9 endpoint tests passed!");
+    // 10. POST /actions/purge with non-existent domain
+    let purge_result = post(&base, "/actions/purge", "domain=nonexistent.com");
+    assert!(
+        purge_result.contains("Error") || purge_result.contains("No pending submission"),
+        "Purge non-existent should show error. Got: {}",
+        &purge_result[..100.min(purge_result.len())]
+    );
+    println!("✓ POST /actions/purge non-existent - Error handling");
+
+    // 11. POST /actions/purge with empty domain
+    let purge_empty = post(&base, "/actions/purge", "domain=");
+    assert!(
+        purge_empty.contains("Error") || purge_empty.contains("No domain specified"),
+        "Purge empty domain should show error"
+    );
+    println!("✓ POST /actions/purge empty domain - Error handling");
+
+    println!("\n✅ All 11 endpoint tests passed!");
+}
+
+#[test]
+fn test_purge_domain_endpoint() {
+    // Start server on a random port
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let tmp = std::env::temp_dir().join(format!("jrg-purge-test-{port}"));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let engine = Arc::new(SearchEngine::new(tmp.clone(), "search.test".into(), port));
+
+    // Serve in a background thread
+    let engine_clone = engine.clone();
+    let _handle = std::thread::spawn(move || {
+        let _ = jaringan_protocol::serve(listener, engine_clone);
+    });
+
+    // Give it a moment to start
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let base = format!("jrg://127.0.0.1:{port}");
+
+    // Submit a domain
+    let submit_result = post(&base, "/actions/submit", "domain=purge-test.com");
+    assert!(
+        submit_result.contains("DNS Verification"),
+        "Submit should succeed. Got: {}",
+        &submit_result[..100.min(submit_result.len())]
+    );
+
+    // Purge the domain
+    let purge_result = post(&base, "/actions/purge", "domain=purge-test.com");
+    assert!(
+        purge_result.contains("Purged"),
+        "Purge should succeed. Got: {}",
+        &purge_result[..100.min(purge_result.len())]
+    );
+
+    // Verify purge by checking status (no pending/verified submissions)
+    let status = get(&base, "/status.jrg");
+    assert!(
+        status.contains("**0**"),
+        "Status should show 0 after purge. Got: {}",
+        &status[..100.min(status.len())]
+    );
+
+    println!("✓ test_purge_domain_endpoint - Submit, purge, verify all passed");
 }
 
 #[test]
@@ -218,7 +284,10 @@ fn test_verify_page_signature_crypto() {
         "verify_page_signature should succeed with correct public key. Got: {:?}",
         result
     );
-    println!("✓ verify_page_signature succeeds with correct public key");
+    // Verify it returns a snippet (heading is skipped, first paragraph is used)
+    let snippet = result.unwrap();
+    assert!(snippet.contains("This is a signed page"), "snippet should contain page body content, got: {snippet}");
+    println!("✓ verify_page_signature succeeds with correct public key, snippet: {snippet}");
 
     // 6. Create an IndexEntryV1 with a WRONG public key
     let mut wrong_seed = [0u8; 32];
