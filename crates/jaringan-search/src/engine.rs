@@ -456,31 +456,26 @@ fn fetch_url_text(url: &str) -> Result<String, String> {
 
 /// Validate a jrgidx entry's signature and encryption fields.
 /// Checks format validity (doesn't fetch the actual page).
-fn validate_entry(entry: &IndexEntryV1) -> bool {
-    // 1. Public key must be ed25519:<base64> format
+pub fn validate_entry(entry: &IndexEntryV1) -> bool {
+    // 1. Public key must be ed25519:<base64> format, exactly 32 bytes decoded
     if !entry.public_key.starts_with("ed25519:") {
         return false;
     }
     let pk_b64 = &entry.public_key["ed25519:".len()..];
-    if pk_b64.is_empty() {
-        return false;
-    }
-    // Try to decode as base64 (validates format)
-    if base64::engine::general_purpose::STANDARD.decode(pk_b64).is_err() {
-        return false;
-    }
+    let _pk_bytes = match base64::engine::general_purpose::STANDARD.decode(pk_b64) {
+        Ok(b) if b.len() == 32 => b,
+        _ => return false,
+    };
 
-    // 2. Signature must be ed25519:<base64> format
+    // 2. Signature must be ed25519:<base64> format, exactly 64 bytes decoded
     if !entry.signature.starts_with("ed25519:") {
         return false;
     }
     let sig_b64 = &entry.signature["ed25519:".len()..];
-    if sig_b64.is_empty() {
-        return false;
-    }
-    if base64::engine::general_purpose::STANDARD.decode(sig_b64).is_err() {
-        return false;
-    }
+    let _sig_bytes = match base64::engine::general_purpose::STANDARD.decode(sig_b64) {
+        Ok(b) if b.len() == 64 => b,
+        _ => return false,
+    };
 
     // 3. Encryption must declare a known suite
     let known_suites = ["xchacha20poly1305", "chacha20poly1305"];

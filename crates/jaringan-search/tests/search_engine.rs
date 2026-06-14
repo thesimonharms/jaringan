@@ -112,3 +112,31 @@ fn test_search_engine_endpoints() {
 
     println!("\n✅ All 9 endpoint tests passed!");
 }
+
+#[test]
+fn validate_entry_rejects_wrong_length_keys() {
+    use jaringan_search::engine::validate_entry;
+    use jaringan_core::IndexEntryV1;
+
+    // 0-byte key (empty base64)
+    let entry_short = IndexEntryV1 {
+        url: "jrg://example.com/p.jrg".into(),
+        title: "Test".into(),
+        public_key: "ed25519:".into(),
+        encryption: "xchacha20poly1305;key-id=k1".into(),
+        signature: "ed25519:".to_owned() + &"A".repeat(86), // 64 bytes base64
+        last_modified: "2026-01-01T00:00:00Z".into(),
+    };
+    assert!(!validate_entry(&entry_short), "should reject empty public key");
+
+    // 64-byte signature field empty
+    let entry_bad_sig = IndexEntryV1 {
+        url: "jrg://example.com/p.jrg".into(),
+        title: "Test".into(),
+        public_key: "ed25519:".to_owned() + &"A".repeat(43), // 32 bytes base64
+        encryption: "xchacha20poly1305;key-id=k1".into(),
+        signature: "ed25519:".into(),
+        last_modified: "2026-01-01T00:00:00Z".into(),
+    };
+    assert!(!validate_entry(&entry_bad_sig), "should reject empty signature");
+}

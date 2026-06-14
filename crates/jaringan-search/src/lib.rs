@@ -3,4 +3,4 @@
 pub mod engine;
 pub mod pages;
 
-pub use engine::SearchEngine;
+pub use engine::{validate_entry, SearchEngine};
