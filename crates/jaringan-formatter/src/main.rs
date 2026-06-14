@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use jaringan_formatter::{FormatOptions, JrgFormatter, LintIssue, LintLevel};
+use jaringan_formatter::{converter, FormatOptions, JrgFormatter, LintIssue, LintLevel};
 
 #[derive(Parser)]
 #[command(name = "jaringan-format", about = "Format and lint .jrg files")]
@@ -40,6 +40,18 @@ enum Command {
         /// Output JSON report
         #[arg(long)]
         json: bool,
+    },
+    /// Convert between JRG and Markdown formats
+    Convert {
+        /// Input file path (use '-' for stdin)
+        input: PathBuf,
+
+        /// Output file path (omit for stdout)
+        output: Option<PathBuf>,
+
+        /// Conversion direction: 'md2jrg' or 'jrg2md'
+        #[arg(long, default_value_t = String::from("md2jrg"))]
+        direction: String,
     },
 }
 
@@ -182,6 +194,54 @@ fn main() {
 
             if has_errors {
                 std::process::exit(1);
+            }
+        }
+        Command::Convert {
+            input,
+            output,
+            direction,
+        } => {
+            let source = if input.to_string_lossy() == "-" {
+                let mut s = String::new();
+                if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut s) {
+                    eprintln!("Error reading stdin: {e}");
+                    std::process::exit(1);
+                }
+                s
+            } else {
+                match std::fs::read_to_string(&input) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("Error reading {}: {e}", input.display());
+                        std::process::exit(1);
+                    }
+                }
+            };
+
+            let result = match direction.as_str() {
+                "md2jrg" => converter::md_to_jrg(&source),
+                "jrg2md" => converter::jrg_to_md(&source),
+                other => {
+                    eprintln!("Unknown direction '{}'. Use 'md2jrg' or 'jrg2md'.", other);
+                    std::process::exit(1);
+                }
+            };
+
+            match result {
+                Ok(output_text) => match output {
+                    Some(path) => match std::fs::write(&path, &output_text) {
+                        Ok(_) => println!("Converted {} -> {}", input.display(), path.display()),
+                        Err(e) => {
+                            eprintln!("Error writing {}: {e}", path.display());
+                            std::process::exit(1);
+                        }
+                    },
+                    None => print!("{}", output_text),
+                },
+                Err(e) => {
+                    eprintln!("Conversion error: {e}");
+                    std::process::exit(1);
+                }
             }
         }
     }

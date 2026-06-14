@@ -2,6 +2,8 @@ use std::fmt::Write;
 
 use jaringan_core::{ActionMethod, Block, Button, Document, Image, Input, Link, Table};
 
+pub mod converter;
+
 // ---------------------------------------------------------------------------
 // Options
 // ---------------------------------------------------------------------------
