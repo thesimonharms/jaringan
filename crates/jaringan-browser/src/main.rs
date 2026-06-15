@@ -169,6 +169,33 @@ enum Command {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+    /// Build WASM scripts for Jaringan pages.
+    Script {
+        #[command(subcommand)]
+        command: ScriptCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ScriptCommand {
+    /// Compile a Rust crate to WASM and optionally generate a .jrg template.
+    Build {
+        /// Path to the Rust crate root (containing Cargo.toml).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Output .wasm file path (default: <target-dir>/<crate-name>.wasm).
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Generate a .jrg page template with the WASM embedded as base64.
+        #[arg(long)]
+        template: Option<PathBuf>,
+        /// Title for the generated .jrg template.
+        #[arg(long, default_value = "Scripted Page")]
+        title: String,
+        /// Label for the script block in the template.
+        #[arg(long, default_value = "Script")]
+        label: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -693,6 +720,7 @@ fn main() -> anyhow::Result<()> {
                 page_metadata: None,
                 blocks: blocks_to_script_blocks(&doc.blocks),
                 tui: None,
+                form_fields: None,
             };
 
             // Create runtime and execute
@@ -871,6 +899,9 @@ fn main() -> anyhow::Result<()> {
                     println!();
                 }
             }
+        }
+        Command::Script { command: ScriptCommand::Build { path, output, template, title, label } } => {
+            cmd_script_build(&path, output.as_deref(), template.as_deref(), &title, &label)?;
         }
         Command::Gateway { command } => match command {
             GatewayCommand::ServeHttp {
@@ -1576,6 +1607,7 @@ fn run_app(
             eprintln!("[jaringan:bridge/{level}] {msg}");
         })),
         store: None,
+        session_store: None,
         resolve_fn: None,
         page_inputs: None,
         tokens: None,
@@ -1627,6 +1659,7 @@ fn run_app(
         page_metadata: None,
         blocks: Vec::new(),
         tui: None,
+        form_fields: None,
     };
     plugin_registry.trigger_hook(&PluginHook::OnPageLoad, &plugin_input);
     let mut tabs: Vec<Tab>;
@@ -2070,6 +2103,7 @@ fn handle_key_event(
             selected_index: state.selected,
             mode: format!("{:?}", state.mode),
         }),
+        form_fields: None,
     };
     plugin_registry.trigger_hook(&PluginHook::OnKey, &plugin_key_input);
 
@@ -3604,6 +3638,138 @@ fn help_lines() -> Vec<Line<'static>> {
             Span::raw("      Quit"),
         ]),
     ]
+}
+
+// ── Script build ─────────────────────────────────────────────────────────
+
+/// Compile a Rust/WAT crate to WASM for Jaringan pages.
+///
+/// Runs `cargo build --target wasm32-unknown-unknown --release` in the given
+/// directory, copies the output .wasm if requested, and optionally generates a
+/// .jrg page template with the WASM embedded as base64.
+fn cmd_script_build(
+    path: &Path,
+    output: Option<&Path>,
+    template: Option<&Path>,
+    title: &str,
+    label: &str,
+) -> anyhow::Result<()> {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+
+    // 1. Verify the path exists and has a Cargo.toml
+    let cargo_toml = path.join("Cargo.toml");
+    if !cargo_toml.exists() {
+        anyhow::bail!(
+            "no Cargo.toml found in {} — this command builds Rust crates targeting wasm32-unknown-unknown.\n\
+             For WAT files, use `wat2wasm` from the wabt toolkit, then embed the .wasm manually.",
+            path.display()
+        );
+    }
+
+    // 2. Rust crate — ensure wasm32-unknown-unknown target is installed
+    println!("Building WASM script in {}...", path.display());
+    let target_check = Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+        .context("failed to check installed targets (is rustup installed?)")?;
+
+    if !String::from_utf8_lossy(&target_check.stdout).contains("wasm32-unknown-unknown") {
+        println!("Installing wasm32-unknown-unknown target...");
+        let install = Command::new("rustup")
+            .args(["target", "add", "wasm32-unknown-unknown"])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("failed to install wasm32-unknown-unknown target")?;
+        if !install.success() {
+            anyhow::bail!("rustup target add wasm32-unknown-unknown failed");
+        }
+    }
+
+    // 3. Run cargo build
+    let mut child = Command::new("cargo")
+        .args(["build", "--target", "wasm32-unknown-unknown", "--release"])
+        .current_dir(path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to spawn cargo build")?;
+
+    // Print build output in real-time
+    if let Some(stdout) = child.stdout.take() {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            if let Ok(l) = line {
+                println!("{l}");
+            }
+        }
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines() {
+            if let Ok(l) = line {
+                eprintln!("{l}");
+            }
+        }
+    }
+
+    let status = child.wait().context("cargo build failed to complete")?;
+    if !status.success() {
+        anyhow::bail!("cargo build failed with exit code: {:?}", status.code());
+    }
+
+    // 4. Find the output .wasm file
+    let target_dir = path.join("target/wasm32-unknown-unknown/release");
+    let wasm_files: Vec<_> = std::fs::read_dir(&target_dir)
+        .with_context(|| format!("failed to read target directory {}", target_dir.display()))?
+        .filter_map(|e| {
+            let p = e.ok()?.path();
+            (p.extension()? == "wasm").then_some(p)
+        })
+        .collect();
+
+    if wasm_files.is_empty() {
+        anyhow::bail!(
+            "no .wasm files found in {} after build",
+            target_dir.display()
+        );
+    }
+
+    // Pick the first .wasm file whose stem doesn't start with a dot
+    let wasm_path = wasm_files
+        .iter()
+        .find(|p| !p.file_stem().unwrap_or_default().to_string_lossy().starts_with('.'))
+        .or_else(|| wasm_files.first())
+        .context("no .wasm files found")?;
+
+    let wasm_bytes = std::fs::read(wasm_path)
+        .with_context(|| format!("failed to read {}", wasm_path.display()))?;
+    let wasm_size = wasm_bytes.len();
+
+    println!(
+        "Built {} ({} bytes)",
+        wasm_path.file_name().unwrap_or_default().to_string_lossy(),
+        wasm_size
+    );
+
+    // 5. Copy to output if requested
+    if let Some(out) = output {
+        std::fs::copy(wasm_path, out)
+            .with_context(|| format!("failed to copy to {}", out.display()))?;
+        println!("Copied to {}", out.display());
+    }
+
+    // 6. Generate .jrg template if requested
+    if let Some(tpl_path) = template {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&wasm_bytes);
+        let jrg = format!("# {title}\n\n~> {label}\n{b64}\n~<\n");
+        std::fs::write(tpl_path, &jrg)
+            .with_context(|| format!("failed to write template to {}", tpl_path.display()))?;
+        println!("Generated template: {}", tpl_path.display());
+    }
+
+    Ok(())
 }
 
 // ── init ──────────────────────────────────────────────────────────────

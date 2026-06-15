@@ -68,6 +68,20 @@ const HEAP_SIZE: usize = 64 * 1024;
 #[cfg(target_arch = "wasm32")]
 static mut HEAP: [u8; HEAP_SIZE] = [0u8; HEAP_SIZE];
 
+// ── Form field definitions ──────────────────────────────────────────
+
+/// A single form field definition returned by a script's `form()` export.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FormFieldDef {
+    pub name: String,
+    pub label: String,
+    #[serde(default)]
+    pub required: bool,
+    pub placeholder: Option<String>,
+    #[serde(rename = "type")]
+    pub field_type: String,
+}
+
 // ── Host function declarations ──────────────────────────────────────
 
 #[link(wasm_import_module = "jaringan")]
@@ -89,7 +103,7 @@ const SCRATCH: usize = 16384;
 /// Standard output buffer location.
 const OUTPUT: usize = 65536;
 
-// ── Entry point macro ───────────────────────────────────────────────
+// ── Entry point macros ─────────────────────────────────────────────
 
 /// Generate the `process(i32, i32) -> i32` WASM entry point.
 ///
@@ -112,6 +126,43 @@ macro_rules! export_process {
             $crate::write_output(&output);
             65536i32
         }
+    };
+}
+
+/// Generate both `form() -> i64` and `process(i32, i32) -> i32` WASM entry points.
+///
+/// The `$form_handler` is a function that takes no arguments and returns a
+/// `Vec<FormFieldDef>` (or any `serde::Serialize`-able type that serializes to
+/// a JSON array of form field definitions). Each field must have at minimum
+/// `name`, `label`, `required`, `placeholder`, and `type` fields.
+///
+/// The `$process_handler` is the same as the handler passed to `export_process!`.
+///
+/// ```ignore
+/// fn my_form() -> Vec<FormFieldDef> {
+///     vec![
+///         FormFieldDef { name: "name".into(), label: "Your name".into(), required: true, placeholder: None, field_type: "text".into() },
+///     ]
+/// }
+/// fn my_handler(input: &str) -> String {
+///     // ... parse, transform, return ...
+/// }
+/// jaring_script_sdk::export_form_process!(my_form, my_handler);
+/// ```
+#[macro_export]
+macro_rules! export_form_process {
+    ($form_handler:path, $process_handler:path) => {
+        #[no_mangle]
+        pub extern "C" fn form() -> i64 {
+            let form_defs = $form_handler();
+            let json = $crate::serde_json::to_string(&form_defs).unwrap_or_else(|_| "[]".into());
+            $crate::write_output(&json);
+            // Pack (ptr << 32 | len) into i64 — pointer is always 65536, len is JSON byte length
+            let len = json.len() as i64;
+            (65536i64 << 32) | len
+        }
+
+        $crate::export_process!($process_handler);
     };
 }
 

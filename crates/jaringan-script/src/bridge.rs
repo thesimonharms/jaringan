@@ -11,6 +11,15 @@ pub struct StoredToken {
     pub expires_at: Option<String>,
 }
 
+/// A shared session-level KV store that persists across page navigations.
+/// Keyed by key name (origin-scoped by the browser, not stored here).
+pub type SharedStore = Arc<std::sync::Mutex<HashMap<String, String>>>;
+
+/// Create a new empty shared store for use across a browser session.
+pub fn new_shared_store() -> SharedStore {
+    Arc::new(std::sync::Mutex::new(HashMap::new()))
+}
+
 /// Holds optional closures that WASM scripts can call via imported host functions.
 #[derive(Clone)]
 pub struct BridgeState {
@@ -18,6 +27,9 @@ pub struct BridgeState {
     pub navigate_fn: Option<Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>>,
     pub log_fn: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
     pub store: Option<HashMap<String, String>>,
+    /// Session-level store that persists across navigations. When set,
+    /// `store_get`/`store_set` use this instead of the per-page `store`.
+    pub session_store: Option<SharedStore>,
     pub resolve_fn: Option<Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>>,
     pub page_inputs: Option<HashMap<String, String>>,
     pub tokens: Option<HashMap<String, StoredToken>>,
@@ -31,10 +43,18 @@ impl BridgeState {
             navigate_fn: None,
             log_fn: None,
             store: None,
+            session_store: None,
             resolve_fn: None,
             page_inputs: None,
             tokens: None,
         }
+    }
+
+    /// Wrap this BridgeState with a shared session store, returning self
+    /// for builder-style chaining.
+    pub fn with_session_store(mut self, store: SharedStore) -> Self {
+        self.session_store = Some(store);
+        self
     }
 
     /// Add a token for the given service, returning self for builder-style chaining.

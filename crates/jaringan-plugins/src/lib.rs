@@ -239,10 +239,10 @@ mod tests {
             title: Some("Test".into()),
             inputs: vec![],
             page_metadata: None,
-            blocks: vec![],
+            blocks: Vec::new(),
             tui: None,
+            form_fields: None,
         };
-
         let results = registry.trigger_hook(&PluginHook::OnPageLoad, &input);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "test");

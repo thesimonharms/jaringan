@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 jaringan-core = { path = "../jaringan-core" }
 jaringan-protocol = { path = "../jaringan-protocol" }
+jaringan-script = { path = "../jaringan-script" }
 anyhow = { workspace = true }
 base64 = { workspace = true }
 clap = { workspace = true, features = ["derive"] }

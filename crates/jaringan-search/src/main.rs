@@ -34,6 +34,11 @@ enum Commands {
         /// Interval in hours for periodic re-indexing of verified domains (0 = disabled)
         #[arg(long, default_value = "6")]
         reindex_hours: u64,
+
+        /// Execute WASM scripts on pages during verification/indexing so the
+        /// index reflects rendered content, not raw page source.
+        #[arg(long, default_value_t = false)]
+        execute_scripts: bool,
     },
     /// Show version
     Version,
@@ -49,9 +54,12 @@ async fn main() -> anyhow::Result<()> {
             data_dir,
             domain,
             reindex_hours,
+            execute_scripts,
         } => {
             let port = extract_port(&bind).unwrap_or(7080);
-            let engine = Arc::new(SearchEngine::new(data_dir, domain, port));
+            let mut engine = SearchEngine::new(data_dir, domain, port);
+            engine.execute_scripts = execute_scripts;
+            let engine = Arc::new(engine);
 
             // Start periodic re-indexing if enabled
             if reindex_hours > 0 {

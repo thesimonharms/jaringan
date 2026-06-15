@@ -35,6 +35,9 @@ pub struct SearchEngine {
     pub index: Mutex<SearchIndexV1>,
     pub submissions: Mutex<HashMap<String, Submission>>,
     pub snippets: Mutex<HashMap<String, String>>,
+    /// If true, execute WASM scripts on pages during verification/indexing
+    /// so the index reflects rendered content, not raw page source.
+    pub execute_scripts: bool,
 }
 
 impl SearchEngine {
@@ -49,6 +52,7 @@ impl SearchEngine {
             index: Mutex::new(index),
             submissions: Mutex::new(submissions),
             snippets: Mutex::new(HashMap::new()),
+            execute_scripts: false,
         }
     }
 
@@ -324,7 +328,7 @@ impl PageResolver for SearchEngine {
                                     let mut valid = Vec::new();
                                     for entry in entries {
                                         if validate_entry(&entry) {
-                                            match verify_page_signature(&entry) {
+                                            match verify_page_signature(&entry, self.execute_scripts) {
                                                 Ok(snippet) => {
                                                     self.store_snippet(&entry.url, snippet);
                                                     valid.push(entry);
@@ -578,20 +582,30 @@ fn jrg_to_http_url(jrg_url: &str) -> Result<String, String> {
 /// Fetch and cryptographically verify a page's signature against the
 /// public key declared in its jrgidx entry.
 ///
+/// If `execute_scripts` is true, WASM scripts on the page are executed
+/// before snippet extraction, so the index reflects rendered content.
+///
 /// Returns Ok(snippet) if the page has a valid Ed25519 signature that verifies
 /// against the declared public key, along with a text snippet from the page body.
 /// Returns Err(reason) otherwise.
-pub fn verify_page_signature(entry: &IndexEntryV1) -> Result<String, String> {
+pub fn verify_page_signature(entry: &IndexEntryV1, execute_scripts: bool) -> Result<String, String> {
     // 1. Convert jrg:// URL to an HTTP URL we can fetch
     let http_url = jrg_to_http_url(&entry.url)?;
 
     // 2. Fetch the page text
     let page_text = fetch_url_text(&http_url)?;
 
-    // 3. Extract snippet from page body (before metadata)
+    // 3. Optionally execute WASM scripts so the snippet reflects rendered content
+    let page_text = if execute_scripts {
+        render_page_with_scripts(&page_text)
+    } else {
+        page_text
+    };
+
+    // 4. Extract snippet from page body (before metadata)
     let snippet = extract_snippet(&page_text);
 
-    // 4. Extract the signer name from the page's `signed-by:` metadata
+    // 5. Extract the signer name from the page's `signed-by:` metadata
     let metadata = source_metadata(&page_text)
         .ok_or_else(|| "page has no metadata section (no ~~~ delimiters)".to_string())?;
     let signer_name = metadata_value(metadata, "signed-by")
@@ -615,7 +629,64 @@ pub fn verify_page_signature(entry: &IndexEntryV1) -> Result<String, String> {
     }
 }
 
-/// Extract a readable snippet from a JRG page body (before metadata).
+/// Optionally render a page by executing its WASM scripts, returning the
+/// rendered page text. If there are no scripts or execution fails, returns
+/// the original text.
+///
+/// This lets the index reflect script-processed content (e.g. enriched
+/// data, injected forms) rather than raw page source.
+fn render_page_with_scripts(page_text: &str) -> String {
+    use jaringan_core::parse_document;
+    use jaringan_script::WasmRuntime;
+
+    let doc = match parse_document(page_text) {
+        Ok(doc) => doc,
+        Err(_) => return page_text.to_string(),
+    };
+
+    // Check if there are any Script blocks
+    let has_scripts = doc.blocks.iter().any(|b| {
+        matches!(b, jaringan_core::Block::Script { .. })
+    });
+    if !has_scripts {
+        return page_text.to_string();
+    }
+
+    let runtime = match WasmRuntime::new() {
+        Ok(r) => r,
+        Err(_) => return page_text.to_string(),
+    };
+
+    match jaringan_script::execute_document_scripts(&runtime, &doc, None) {
+        Ok(rendered_blocks) => {
+            // Convert rendered blocks to plain text for snippet extraction
+            let mut text = String::new();
+            for block in &rendered_blocks {
+                match block {
+                    jaringan_core::Block::Heading { text: t, .. }
+                    | jaringan_core::Block::Paragraph(t) => {
+                        text.push_str(t);
+                        text.push(' ');
+                    }
+                    jaringan_core::Block::List(items) => {
+                        for item in items {
+                            text.push_str(item);
+                            text.push(' ');
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if text.is_empty() {
+                page_text.to_string()
+            } else {
+                text
+            }
+        }
+        Err(_) => page_text.to_string(),
+    }
+}
+
 /// Takes the first non-heading, non-link, non-empty paragraph.
 fn extract_snippet(page_text: &str) -> String {
     // Strip metadata section (everything after ~~~~~)
@@ -687,7 +758,7 @@ pub fn start_periodic_reindex(engine: Arc<SearchEngine>) {
                     let mut valid = Vec::new();
                     for entry in entries {
                         if validate_entry(&entry) {
-                            match verify_page_signature(&entry) {
+                            match verify_page_signature(&entry, engine_for_thread.execute_scripts) {
                                 Ok(snippet) => {
                                     engine_for_thread.store_snippet(&entry.url, snippet);
                                     valid.push(entry);

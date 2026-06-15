@@ -278,7 +278,7 @@ fn test_verify_page_signature_crypto() {
     };
 
     // 5. verify_page_signature should succeed with the correct key
-    let result = verify_page_signature(&valid_entry);
+    let result = verify_page_signature(&valid_entry, false);
     assert!(
         result.is_ok(),
         "verify_page_signature should succeed with correct public key. Got: {:?}",
@@ -306,7 +306,7 @@ fn test_verify_page_signature_crypto() {
     };
 
     // 7. verify_page_signature should fail with a different public key
-    let result = verify_page_signature(&invalid_entry);
+    let result = verify_page_signature(&invalid_entry, false);
     assert!(
         result.is_err(),
         "verify_page_signature should fail with wrong public key"

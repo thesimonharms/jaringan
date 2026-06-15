@@ -3,6 +3,8 @@ pub mod bridge;
 pub use bridge::{BridgeState, read_string, write_error, write_json};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::Mutex;
 use wasmtime::{AsContext, AsContextMut, Caller, Engine, Linker, Memory, Module, Store};
 
 /// A single input field for a script's UI form.
@@ -12,6 +14,25 @@ pub struct ScriptInputField {
     pub label: String,
     pub value: Option<String>,
     pub placeholder: Option<String>,
+    /// Whether this field is required (for form definitions).
+    #[serde(default)]
+    pub required: Option<bool>,
+    /// The field type (e.g. "text", "checkbox", "email") — used in form definitions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_type: Option<String>,
+}
+
+/// A form field definition returned by a script's `form()` export.
+/// This is the deserialization target for the JSON returned by `form()`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FormFieldDef {
+    pub name: String,
+    pub label: String,
+    #[serde(default)]
+    pub required: bool,
+    pub placeholder: Option<String>,
+    #[serde(rename = "type")]
+    pub field_type: String,
 }
 
 /// A block of rendered content produced by a script.
@@ -37,6 +58,17 @@ pub enum ScriptBlock {
     Link { url: String, text: String },
     #[serde(rename = "quote")]
     Quote { text: String, attribution: Option<String> },
+    /// A form field definition returned by a script's `form()` export.
+    #[serde(rename = "form_field")]
+    FormField {
+        name: String,
+        label: String,
+        #[serde(default)]
+        required: bool,
+        placeholder: Option<String>,
+        #[serde(rename = "field_type")]
+        field_type: String,
+    },
 }
 
 /// TUI context passed into the script about the current browser state.
@@ -89,6 +121,10 @@ pub struct ScriptInput {
     pub page_metadata: Option<serde_json::Value>,
     pub blocks: Vec<ScriptBlock>,
     pub tui: Option<TuiContext>,
+    /// Form field definitions from the script's `form()` export, if any.
+    /// These describe the fields the script expects the user to fill in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form_fields: Option<Vec<FormFieldDef>>,
 }
 
 /// Output produced by a WASM script.
@@ -117,8 +153,13 @@ pub enum WasmError {
 
 /// A thin wrapper around a wasmtime engine and store for executing
 /// Jaringan scripts compiled to WebAssembly.
+///
+/// Maintains an internal module cache keyed by SHA-256 hash of the
+/// WASM binary, so re-visiting the same page doesn't re-compile the
+/// WASM module.
 pub struct WasmRuntime {
     engine: Engine,
+    module_cache: Mutex<HashMap<u64, Module>>, // hash → Module
 }
 
 impl WasmRuntime {
@@ -132,7 +173,26 @@ impl WasmRuntime {
         // Enable fuel metering to prevent runaway WASM execution
         config.consume_fuel(true);
         let engine = Engine::new(&config)?;
-        Ok(Self { engine })
+        Ok(Self {
+            engine,
+            module_cache: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Get or compile a WASM module, using the internal cache.
+    fn get_or_compile_module(&self, wasm_binary: &[u8]) -> Result<Module, WasmError> {
+        let mut hasher = std::hash::DefaultHasher::new();
+        wasm_binary.hash(&mut hasher);
+        let hash = hasher.finish();
+
+        let mut cache = self.module_cache.lock().unwrap();
+        if let Some(module) = cache.get(&hash) {
+            return Ok(module.clone());
+        }
+
+        let module = Module::new(&self.engine, wasm_binary)?;
+        cache.insert(hash, module.clone());
+        Ok(module)
     }
 
     /// Execute a WASM module with the given `ScriptInput` and return the
@@ -165,7 +225,7 @@ impl WasmRuntime {
         let mut store = Store::new(&self.engine, bridge);
         // Set fuel limit to prevent runaway WASM execution
         store.set_fuel(DEFAULT_FUEL_LIMIT)?;
-        let module = Module::new(&self.engine, wasm_binary)?;
+        let module = self.get_or_compile_module(wasm_binary)?;
         let mut linker = Linker::new(&self.engine);
 
         // ── Register host functions unconditionally ──────────────────────────
@@ -309,27 +369,22 @@ impl WasmRuntime {
                 };
 
                 let state = caller.data();
-                match &state.store {
-                    Some(map) => {
-                        let value = map.get(&key).cloned().unwrap_or_default();
-                        let mut ctx = caller.as_context_mut();
-                        let json = serde_json::json!({ "value": value });
-                        write_json(
-                            &mem,
-                            &mut ctx,
-                            &serde_json::to_string(&json).unwrap_or_default(),
-                        )
-                    }
-                    None => {
-                        let mut ctx = caller.as_context_mut();
-                        let json = serde_json::json!({ "value": "" });
-                        write_json(
-                            &mem,
-                            &mut ctx,
-                            &serde_json::to_string(&json).unwrap_or_default(),
-                        )
-                    }
-                }
+                // Prefer session_store over per-page store
+                let value = if let Some(ref sstore) = state.session_store {
+                    let map = sstore.lock().unwrap();
+                    map.get(&key).cloned().unwrap_or_default()
+                } else if let Some(ref map) = state.store {
+                    map.get(&key).cloned().unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let mut ctx = caller.as_context_mut();
+                let json = serde_json::json!({ "value": value });
+                write_json(
+                    &mem,
+                    &mut ctx,
+                    &serde_json::to_string(&json).unwrap_or_default(),
+                )
             },
         )?;
 
@@ -353,8 +408,14 @@ impl WasmRuntime {
                 };
 
                 let state = caller.data_mut();
-                let map = state.store.get_or_insert_with(HashMap::new);
-                map.insert(key, value);
+                // Prefer session_store over per-page store
+                if let Some(ref sstore) = state.session_store {
+                    let mut map = sstore.lock().unwrap();
+                    map.insert(key, value);
+                } else {
+                    let map = state.store.get_or_insert_with(HashMap::new);
+                    map.insert(key, value);
+                }
                 0
             },
         )?;
@@ -538,6 +599,117 @@ impl WasmRuntime {
         let output: ScriptOutput = serde_json::from_str(output_json)?;
         Ok(output)
     }
+
+    /// Call the optional `form()` export on a WASM module and return the
+    /// parsed form field definitions, or `None` if the module does not export
+    /// `form()`.
+    ///
+    /// The `form()` function signature is `form() -> i64` where the return
+    /// value packs `(ptr << 32 | len)` — a pointer to the JSON array of field
+    /// definitions in linear memory (using offset 65536 as the write location).
+    pub fn get_script_form(
+        &self,
+        wasm_binary: &[u8],
+    ) -> Result<Option<Vec<FormFieldDef>>, WasmError> {
+        let mut store = Store::new(&self.engine, BridgeState::empty());
+        store.set_fuel(DEFAULT_FUEL_LIMIT)?;
+        let module = self.get_or_compile_module(wasm_binary)?;
+        let mut linker = Linker::new(&self.engine);
+
+        // Register host functions unconditionally (same as execute_with_bridge)
+        linker.func_wrap(
+            "jaringan",
+            "fetch",
+            |_caller: Caller<'_, BridgeState>, _url_ptr: i32, _url_len: i32| -> i32 { 0 },
+        )?;
+        linker.func_wrap(
+            "jaringan",
+            "log",
+            |_caller: Caller<'_, BridgeState>, _level_ptr: i32, _level_len: i32, _msg_ptr: i32, _msg_len: i32| {
+            },
+        )?;
+        linker.func_wrap(
+            "jaringan",
+            "navigate",
+            |_caller: Caller<'_, BridgeState>, _url_ptr: i32, _url_len: i32| -> i32 { 0 },
+        )?;
+        linker.func_wrap(
+            "jaringan",
+            "store_get",
+            |_caller: Caller<'_, BridgeState>, _key_ptr: i32, _key_len: i32| -> i32 { 0 },
+        )?;
+        linker.func_wrap(
+            "jaringan",
+            "store_set",
+            |_caller: Caller<'_, BridgeState>, _key_ptr: i32, _key_len: i32, _val_ptr: i32, _val_len: i32| -> i32 { 0 },
+        )?;
+        linker.func_wrap(
+            "jaringan",
+            "resolve",
+            |_caller: Caller<'_, BridgeState>, _url_ptr: i32, _url_len: i32| -> i32 { 0 },
+        )?;
+        linker.func_wrap(
+            "jaringan",
+            "input",
+            |_caller: Caller<'_, BridgeState>, _name_ptr: i32, _name_len: i32| -> i32 { 0 },
+        )?;
+        linker.func_wrap(
+            "jaringan",
+            "provide_token",
+            |_caller: Caller<'_, BridgeState>,
+             _service_ptr: i32, _service_len: i32,
+             _token_ptr: i32, _token_len: i32| -> i32 { 0 },
+        )?;
+
+        let instance = linker.instantiate(&mut store, &module)?;
+
+        // Check if form() export exists — if not, return None (optional export)
+        let form_export = match instance.get_export(&mut store, "form") {
+            Some(export) => export.into_func(),
+            None => return Ok(None),
+        };
+
+        let Some(form_func) = form_export else {
+            return Ok(None);
+        };
+
+        let form_typed = form_func.typed::<(), i64>(&store)?;
+        let packed = form_typed.call(&mut store, ())?;
+
+        // Unpack (ptr << 32 | len)
+        let ptr = (packed >> 32) as i32;
+        let len = (packed & 0xFFFF_FFFF) as i32;
+
+        let memory: Memory = instance
+            .get_export(&mut store, "memory")
+            .ok_or_else(|| WasmError::MissingExport("memory".into()))?
+            .into_memory()
+            .ok_or_else(|| WasmError::MissingExport("memory (expected Memory)".into()))?;
+
+        let mem_data = memory.data(&store);
+
+        if ptr < 0 || len < 0 || (ptr as usize + 4) > mem_data.len() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let ptr_u = ptr as usize;
+        let len_bytes: [u8; 4] = mem_data[ptr_u..ptr_u + 4]
+            .try_into()
+            .map_err(|_| WasmError::Memory("failed to read form output length".into()))?;
+        let output_len = u32::from_le_bytes(len_bytes) as usize;
+
+        let json_start = ptr_u + 4;
+        let json_end = json_start + output_len;
+        if json_end > mem_data.len() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let form_json = std::str::from_utf8(&mem_data[json_start..json_end])
+            .map_err(|e| WasmError::Memory(format!("form output is not valid UTF-8: {}", e)))?;
+
+        let fields: Vec<FormFieldDef> = serde_json::from_str(form_json)?;
+        Ok(Some(fields))
+    }
 }
 
 /// Convert a slice of `jaringan_core::Block` into the WASM-friendly `ScriptBlock` format.
@@ -576,6 +748,10 @@ pub fn script_blocks_to_blocks(script_blocks: &[ScriptBlock]) -> Vec<jaringan_co
         ScriptBlock::Image { url, alt } => Block::Image(Image { source: url.clone(), alt: alt.clone().unwrap_or_default() }),
         ScriptBlock::Link { url, text } => Block::Link(Link { target: url.clone(), label: text.clone() }),
         ScriptBlock::Quote { text, .. } => Block::Quote(text.clone()),
+        ScriptBlock::FormField { .. } => {
+            // FormField definitions are renderer-only; skip when converting back to core blocks.
+            Block::Paragraph(String::new())
+        }
     }).collect()
 }
 
@@ -623,12 +799,15 @@ pub fn execute_document_scripts(
                         label: i.label.clone(),
                         value: Some(i.value.clone()),
                         placeholder: i.placeholder.clone(),
+                        required: None,
+                        field_type: None,
                     })
-                } else { None }
+                } else {None }
             }).collect(),
             page_metadata: parse_page_metadata(doc.metadata.as_deref()),
             blocks: script_blocks,
             tui: None,
+            form_fields: None,
         };
 
         let output = if let Some(b) = bridge {
@@ -705,6 +884,7 @@ mod tests {
                 text: "Hello".into(),
             }],
             tui: None,
+            form_fields: None,
         };
         let output = runtime.execute(&wasm_binary, &input).unwrap();
         assert_eq!(output.blocks.len(), 1);
@@ -723,6 +903,8 @@ mod tests {
                 label: "Name".into(),
                 value: Some("Simon".into()),
                 placeholder: None,
+                required: None,
+                field_type: None,
             }],
             page_metadata: None,
             blocks: vec![
@@ -730,6 +912,7 @@ mod tests {
                 ScriptBlock::Paragraph { text: "Hello from the other side".into() },
             ],
             tui: None,
+            form_fields: None,
         };
 
         let output = runtime.execute(&wasm, &input).unwrap();
@@ -790,6 +973,7 @@ mod tests {
                 assert_eq!(msg, "Hello from WASM");
             })),
             store: None,
+            session_store: None,
             resolve_fn: None,
             page_inputs: None,
             tokens: None,
@@ -801,11 +985,101 @@ mod tests {
             page_metadata: None,
             blocks: vec![],
             tui: None,
+            form_fields: None,
         };
 
         let output = runtime.execute_with_bridge(&wasm, &input, bridge).unwrap();
         assert_eq!(output.blocks.len(), 0);
         assert!(fetch_called.load(std::sync::atomic::Ordering::SeqCst), "fetch should have been called");
         assert!(log_called.load(std::sync::atomic::Ordering::SeqCst), "log should have been called");
+    }
+
+    /// JSON bytes: [{\"name\":\"name\",\"label\":\"Your Name\",\"required\":true,\"placeholder\":null,\"type\":\"text\"},{\"name\":\"agree\",\"label\":\"Agree\",\"required\":false,\"placeholder\":null,\"type\":\"checkbox\"}]
+    /// In WAT, backslash-quote is an escaped quote, so \" → "
+    /// In the Rust raw string, the characters before WAT parsing are literally backslash-quote
+    /// Build a WAT module that exports both `form()` and `process()`.
+    /// The JSON form field definitions are embedded via a hex data segment
+    /// to avoid Rust/wat string escape confusion.
+    fn make_form_wat(json_hex: &str, json_len: u32) -> String {
+        format!(
+            r#"(module
+  (memory (export "memory") 2)
+  (data (i32.const 60000) "{json_hex}")
+  (func (export "form") (result i64)
+    (i32.store (i32.const 65536) (i32.const {json_len}))
+    (memory.copy (i32.const 65540) (i32.const 60000) (i32.const {json_len}))
+    (i64.const {packed})
+  )
+  (func (export "process") (param i32 i32) (result i32)
+    (i32.store (i32.const 65536) (local.get 1))
+    (memory.copy (i32.const 65540) (i32.const 0) (local.get 1))
+    (i32.const 65536)
+  )
+)"#,
+            packed = (65536u64 << 32) | (json_len as u64)
+        )
+    }
+
+    fn hex_encode(s: &str) -> String {
+        s.bytes().map(|b| format!("\\{:02x}", b)).collect()
+    }
+
+    #[test]
+    fn form_without_export_returns_none() {
+        let wasm_binary = wat::parse_str(IDENTITY_WAT).unwrap();
+        let runtime = WasmRuntime::new().unwrap();
+        let form_fields = runtime.get_script_form(&wasm_binary).unwrap();
+        assert!(form_fields.is_none(), "module without form() export should return None");
+    }
+
+    #[test]
+    fn get_script_form_returns_correct_fields() {
+        let json = r#"[{"name":"name","label":"Your Name","required":true,"placeholder":null,"type":"text"},{"name":"agree","label":"Agree","required":false,"placeholder":null,"type":"checkbox"}]"#;
+        let wat = make_form_wat(&hex_encode(json), json.len() as u32);
+        let wasm_binary = wat::parse_str(&wat).unwrap();
+        let runtime = WasmRuntime::new().unwrap();
+
+        let form_fields = runtime.get_script_form(&wasm_binary).unwrap();
+        assert!(form_fields.is_some(), "module with form() export should return Some");
+
+        let fields = form_fields.unwrap();
+        assert_eq!(fields.len(), 2, "should have 2 form fields");
+
+        assert_eq!(fields[0].name, "name");
+        assert_eq!(fields[0].label, "Your Name");
+        assert!(fields[0].required);
+        assert_eq!(fields[0].placeholder, None);
+        assert_eq!(fields[0].field_type, "text");
+
+        assert_eq!(fields[1].name, "agree");
+        assert_eq!(fields[1].label, "Agree");
+        assert!(!fields[1].required);
+        assert_eq!(fields[1].placeholder, None);
+        assert_eq!(fields[1].field_type, "checkbox");
+    }
+
+    #[test]
+    fn form_and_process_work_together() {
+        let json = r#"[{"name":"name","label":"Your Name","required":true,"placeholder":null,"type":"text"},{"name":"agree","label":"Agree","required":false,"placeholder":null,"type":"checkbox"}]"#;
+        let wat = make_form_wat(&hex_encode(json), json.len() as u32);
+        let wasm_binary = wat::parse_str(&wat).unwrap();
+        let runtime = WasmRuntime::new().unwrap();
+
+        // Verify form fields
+        let form_fields = runtime.get_script_form(&wasm_binary).unwrap();
+        assert!(form_fields.is_some());
+        assert_eq!(form_fields.as_ref().unwrap().len(), 2);
+
+        // Verify process still works (identity)
+        let input = ScriptInput {
+            title: Some("Form Test".into()),
+            inputs: vec![],
+            page_metadata: None,
+            blocks: vec![],
+            tui: None,
+            form_fields,
+        };
+        let output = runtime.execute(&wasm_binary, &input).unwrap();
+        assert_eq!(output.blocks.len(), 0);
     }
 }

@@ -1684,6 +1684,7 @@ dependencies = [
  "hickory-resolver",
  "jaringan-core",
  "jaringan-protocol",
+ "jaringan-script",
  "rand",
  "reqwest",
  "serde",
