@@ -708,21 +708,21 @@ pub fn render_html(document: &Document) -> String {
                 output.push_str(&render_table_html(table));
             }
             Block::Preformatted { code, language } => {
-                if let Some(lang) = language {
-                    if let Some(syntax) = SYNTAX_SET.find_syntax_by_token(lang) {
-                        let theme = get_theme("base16-ocean.dark");
-                        if let Ok(highlighted) = syntect::html::highlighted_html_for_string(
-                            code,
-                            &SYNTAX_SET,
-                            syntax,
-                            &theme,
-                        ) {
-                            output.push_str(&highlighted);
-                            output.push('\n');
-                            continue;
-                        }
-                    }
-                }
+                            if let Some(lang) = language
+                                && let Some(syntax) = SYNTAX_SET.find_syntax_by_token(lang)
+                            {
+                                let theme = get_theme("base16-ocean.dark");
+                                if let Ok(highlighted) = syntect::html::highlighted_html_for_string(
+                                    code,
+                                    &SYNTAX_SET,
+                                    syntax,
+                                    &theme,
+                                ) {
+                                    output.push_str(&highlighted);
+                                    output.push('\n');
+                                    continue;
+                                }
+                            }
                 // Fallback: plain escaped code block
                 let lang_class = language.as_deref().unwrap_or("");
                 output.push_str(&format!(

@@ -20,17 +20,26 @@ pub fn new_shared_store() -> SharedStore {
     Arc::new(std::sync::Mutex::new(HashMap::new()))
 }
 
+/// A host function closure executed from WASM for fetch operations.
+type FetchFn = Arc<dyn Fn(&str, Option<&str>) -> Result<String, String> + Send + Sync>;
+/// A host function closure for navigation requests from WASM.
+type NavigateFn = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
+/// A host function closure for logging from WASM.
+type LogFn = Arc<dyn Fn(&str, &str) + Send + Sync>;
+/// A host function closure for resolving URLs from WASM.
+type ResolveFn = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
+
 /// Holds optional closures that WASM scripts can call via imported host functions.
 #[derive(Clone)]
 pub struct BridgeState {
-    pub fetch_fn: Option<Arc<dyn Fn(&str, Option<&str>) -> Result<String, String> + Send + Sync>>,
-    pub navigate_fn: Option<Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>>,
-    pub log_fn: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
+    pub fetch_fn: Option<FetchFn>,
+    pub navigate_fn: Option<NavigateFn>,
+    pub log_fn: Option<LogFn>,
     pub store: Option<HashMap<String, String>>,
     /// Session-level store that persists across navigations. When set,
     /// `store_get`/`store_set` use this instead of the per-page `store`.
     pub session_store: Option<SharedStore>,
-    pub resolve_fn: Option<Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>>,
+    pub resolve_fn: Option<ResolveFn>,
     pub page_inputs: Option<HashMap<String, String>>,
     pub tokens: Option<HashMap<String, StoredToken>>,
 }

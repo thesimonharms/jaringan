@@ -255,9 +255,9 @@ impl PageResolver for MicroblogResolver {
 
 fn parse_form_value<'a>(body: &'a str, key: &str) -> Option<&'a str> {
     for pair in body.split('&') {
-        let mut parts = pair.splitn(2, '=');
-        let k = parts.next()?;
-        let v = parts.next()?;
+        let (k, v) = pair.split_once('=')?;
+        
+        
         if k == key {
             return Some(v);
         }

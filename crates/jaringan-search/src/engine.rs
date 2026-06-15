@@ -58,25 +58,21 @@ impl SearchEngine {
 
     fn load_index(data_dir: &Path) -> SearchIndexV1 {
         let path = data_dir.join("index.jrgidx");
-        if path.exists() {
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                if let Ok(index) = SearchIndexV1::from_index_text_v1(&text) {
+        if path.exists()
+            && let Ok(text) = std::fs::read_to_string(&path)
+                && let Ok(index) = SearchIndexV1::from_index_text_v1(&text) {
                     return index;
                 }
-            }
-        }
         SearchIndexV1::default()
     }
 
     fn load_submissions(data_dir: &Path) -> HashMap<String, Submission> {
         let path = data_dir.join("submissions.json");
-        if path.exists() {
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                if let Ok(subs) = serde_json::from_str(&text) {
+        if path.exists()
+            && let Ok(text) = std::fs::read_to_string(&path)
+                && let Ok(subs) = serde_json::from_str(&text) {
                     return subs;
                 }
-            }
-        }
         HashMap::new()
     }
 
@@ -190,9 +186,9 @@ use jaringan_protocol::{PageResolver, Request, RequestMethod, ResolveError, Resp
 
 fn parse_form_value<'a>(body: &'a str, key: &str) -> Option<&'a str> {
     for pair in body.split('&') {
-        let mut parts = pair.splitn(2, '=');
-        let k = parts.next()?;
-        let v = parts.next()?;
+        let (k, v) = pair.split_once('=')?;
+        
+        
         if k == key && !v.is_empty() {
             return Some(v);
         }
@@ -256,12 +252,12 @@ impl PageResolver for SearchEngine {
             }
 
             // GET /submit.jrg — Submission form
-            (RequestMethod::Get, p) if p == "/submit.jrg" => {
+            (RequestMethod::Get, "/submit.jrg") => {
                 Ok(Response::page(StatusCode::Ok, pages::SUBMIT_FORM.to_string()))
             }
 
             // GET /status.jrg — Engine status
-            (RequestMethod::Get, p) if p == "/status.jrg" => {
+            (RequestMethod::Get, "/status.jrg") => {
                 let (total_pages, verified_domains) = self.stats();
                 let page = pages::status_page(total_pages, verified_domains, &self.domain, self.port);
                 Ok(Response::page(StatusCode::Ok, page))
@@ -327,15 +323,11 @@ impl PageResolver for SearchEngine {
                                     let total = entries.len();
                                     let mut valid = Vec::new();
                                     for entry in entries {
-                                        if validate_entry(&entry) {
-                                            match verify_page_signature(&entry, self.execute_scripts) {
-                                                Ok(snippet) => {
-                                                    self.store_snippet(&entry.url, snippet);
-                                                    valid.push(entry);
-                                                }
-                                                Err(_) => {}
+                                        if validate_entry(&entry)
+                                            && let Ok(snippet) = verify_page_signature(&entry, self.execute_scripts) {
+                                                self.store_snippet(&entry.url, snippet);
+                                                valid.push(entry);
                                             }
-                                        }
                                     }
                                     let page_count = valid.len();
                                     let skip_count = total - page_count;
@@ -486,12 +478,12 @@ fn fetch_remote_jrgidx(domain: &str) -> Result<Vec<IndexEntryV1>, String> {
         Ok(text) => {
             let index = SearchIndexV1::from_index_text_v1(&text)
                 .map_err(|e| format!("bad jrgidx format from {http_url}: {e}"))?;
-            return Ok(index.entries().to_vec());
+            Ok(index.entries().to_vec())
         }
         Err(e) => {
-            return Err(format!(
+            Err(format!(
                 "could not fetch jrgidx from {domain}. Tried HTTPS and HTTP. Last error: {e}"
-            ));
+            ))
         }
     }
 }
@@ -757,15 +749,11 @@ pub fn start_periodic_reindex(engine: Arc<SearchEngine>) {
                 Ok(entries) => {
                     let mut valid = Vec::new();
                     for entry in entries {
-                        if validate_entry(&entry) {
-                            match verify_page_signature(&entry, engine_for_thread.execute_scripts) {
-                                Ok(snippet) => {
-                                    engine_for_thread.store_snippet(&entry.url, snippet);
-                                    valid.push(entry);
-                                }
-                                Err(_) => {}
+                        if validate_entry(&entry)
+                            && let Ok(snippet) = verify_page_signature(&entry, engine_for_thread.execute_scripts) {
+                                engine_for_thread.store_snippet(&entry.url, snippet);
+                                valid.push(entry);
                             }
-                        }
                     }
                     eprintln!("🔄   {domain}: {} valid entries", valid.len());
                     for entry in valid {
@@ -830,9 +818,9 @@ fn check_dns_txt(domain: &str, expected_token: &str) -> bool {
 
 fn parse_query_param(query: &str, key: &str) -> Option<String> {
     for pair in query.split('&') {
-        let mut parts = pair.splitn(2, '=');
-        let k = parts.next()?;
-        let v = parts.next()?;
+        let (k, v) = pair.split_once('=')?;
+        
+        
         if k == key && !v.is_empty() {
             return Some(urlencoding_decode(v));
         }

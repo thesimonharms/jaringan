@@ -776,13 +776,9 @@ pub fn execute_document_scripts(
 
     // Loop: find the FIRST Script block in the current blocks each time.
     // This avoids stale indices when a previous script replaces all blocks.
-    loop {
-        let script_idx = match current_blocks.iter().position(|b| {
-            matches!(b, jaringan_core::Block::Script { .. })
-        }) {
-            Some(idx) => idx,
-            None => break, // no more scripts — done
-        };
+    while let Some(script_idx) = current_blocks.iter().position(|b| {
+        matches!(b, jaringan_core::Block::Script { .. })
+    }) {
 
         let Block::Script { wasm, .. } = &current_blocks[script_idx] else {
             unreachable!("position() returned a Script index");

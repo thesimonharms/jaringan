@@ -170,6 +170,7 @@ pub enum Overlay {
     Bookmarks,
     Find,
     PageInfo,
+    GoTo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +202,8 @@ pub struct BrowserState {
     pub bookmarks: Vec<Bookmark>,
     pub find_state: FindState,
     pub config: Config,
+    pub goto_buffer: String,
+    pub show_source: bool,
 }
 
 impl BrowserState {
@@ -226,6 +229,8 @@ impl BrowserState {
                 match_idx: 0,
             },
             config,
+            goto_buffer: String::new(),
+            show_source: false,
         }
     }
 

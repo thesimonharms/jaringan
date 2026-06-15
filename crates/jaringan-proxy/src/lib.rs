@@ -121,8 +121,8 @@ pub fn handle_connection(
 
     // If Content-Length is larger than the body we actually received,
     // the client disconnected early. Don't forward to upstream.
-    if let Some(claimed) = parse_content_length(&request_head) {
-        if request_body.len() < claimed {
+    if let Some(claimed) = parse_content_length(&request_head)
+        && request_body.len() < claimed {
             eprintln!(
                 "⚠️  [{peer:?}] client sent incomplete body (Content-Length={claimed}, got={})",
                 request_body.len()
@@ -135,7 +135,6 @@ pub fn handle_connection(
             );
             return Ok(());
         }
-    }
 
     // 3. Connect to backend
     let mut upstream = match TcpStream::connect(&backend) {
@@ -219,13 +218,12 @@ pub fn extract_host(head: &[u8]) -> Option<String> {
         if line.is_empty() {
             break;
         }
-        if let Some((key, value)) = line.split_once(':') {
-            if key.trim().eq_ignore_ascii_case("host") {
+        if let Some((key, value)) = line.split_once(':')
+            && key.trim().eq_ignore_ascii_case("host") {
                 let v = value.trim();
                 let host = v.rsplit_once(':').map(|(h, _)| h).unwrap_or(v);
                 return Some(host.to_string());
             }
-        }
     }
     None
 }
@@ -239,11 +237,10 @@ fn parse_content_length_from_text(text: &str) -> Option<usize> {
         if line.is_empty() {
             break;
         }
-        if let Some((key, value)) = line.split_once(':') {
-            if key.trim().eq_ignore_ascii_case("content-length") {
+        if let Some((key, value)) = line.split_once(':')
+            && key.trim().eq_ignore_ascii_case("content-length") {
                 return value.trim().parse().ok();
             }
-        }
     }
     None
 }

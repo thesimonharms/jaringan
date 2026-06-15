@@ -20,7 +20,7 @@ use jaringan_browser::{
     ActionConfirmation, BrowserMode, BrowserState, FindState, PageLocation, SavedTab,
     cache_filename_for_url, config::parse_color, go_back, go_forward, load_tabs, navigate_to,
     resolve_target, save_tabs, scroll_down, scroll_page_down, scroll_page_up, scroll_to_bottom,
-    scroll_to_top, scroll_up, selection_down, selection_first, selection_last, selection_up,
+    scroll_up, selection_down, selection_first, selection_last, selection_up,
     switch_mode, toggle_mode, toggle_overlay, web_to_jrg_url,
 };
 use jaringan_core::{
@@ -88,6 +88,9 @@ enum Command {
         url: String,
         /// The button id or label to click.
         button: String,
+        /// Input field name=value pairs to set before clicking.
+        #[arg(long, short)]
+        field: Vec<String>,
     },
     /// Start an interactive session, reading commands from stdin.
     Session {
@@ -150,8 +153,9 @@ enum Command {
     },
     /// Open a local path or jrg:// URL in the interactive terminal browser.
     Open {
-        /// URL or file path to open (default: welcome page).
-        target: Option<String>,
+        /// URLs or file paths to open (default: welcome page).
+        #[arg(num_args = 0..)]
+        targets: Vec<String>,
     },
     /// Run the JRG-HTTP two-way gateway.
     Gateway {
@@ -263,6 +267,10 @@ struct LoadedPage {
     items: Vec<InteractiveItem>,
     signature_status: SignatureStatus,
     stream_rx: Option<Arc<Mutex<mpsc::Receiver<String>>>>,
+    raw_body: Option<String>,
+    content_type: String,
+    body_size: usize,
+    load_time_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -464,11 +472,10 @@ fn main() -> anyhow::Result<()> {
 
             let mut updated_blocks = doc.blocks.clone();
             for block in &mut updated_blocks {
-                if let Block::Input(input) = block {
-                    if let Some(value) = fields.get(&input.name) {
+                if let Block::Input(input) = block
+                    && let Some(value) = fields.get(&input.name) {
                         input.value = value.clone();
                     }
-                }
             }
 
             let inputs: Vec<_> = updated_blocks.iter().filter_map(|b| match b {
@@ -489,20 +496,27 @@ fn main() -> anyhow::Result<()> {
 
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
-        Command::Click { url, button } => {
+        Command::Click { url, button, field } => {
             let parsed = JaringanUrl::parse(&url)?;
             let response = fetch_tcp(&parsed)
                 .with_context(|| format!("failed to fetch {url}"))?;
             let doc = parse_document(&response.body)
                 .with_context(|| format!("failed to parse document from {url}"))?;
 
+            // Parse -f name=value pairs
+            let mut fields = HashMap::new();
+            for f in &field {
+                if let Some((name, value)) = f.split_once('=') {
+                    fields.insert(name.to_string(), value.to_string());
+                }
+            }
+
             // Find the first Button block whose id or label matches
             let found = doc.blocks.iter().find_map(|b| {
-                if let Block::Button(btn) = b {
-                    if btn.id == button || btn.label == button {
+                if let Block::Button(btn) = b
+                    && (btn.id == button || btn.label == button) {
                         return Some(btn);
                     }
-                }
                 None
             });
 
@@ -514,6 +528,15 @@ fn main() -> anyhow::Result<()> {
                     return Ok(());
                 }
             };
+
+            // Apply field overrides to document inputs
+            let mut doc_blocks = doc.blocks.clone();
+            for block in &mut doc_blocks {
+                if let Block::Input(input) = block
+                    && let Some(value) = fields.get(&input.name) {
+                        input.value = value.clone();
+                    }
+            }
 
             // Resolve target (relative or absolute)
             let target_url = JaringanUrl::parse(&found.target).unwrap_or_else(|_| {
@@ -528,8 +551,12 @@ fn main() -> anyhow::Result<()> {
                         .with_context(|| format!("failed to fetch button target {}", target_url))?
                 }
                 ActionMethod::Post => {
-                    // Construct POST body — include button id as minimal payload
-                    let body = format!("button={}", found.id);
+                    // Build POST body: input values + button id
+                    let mut body = input_payload_from_blocks(&doc_blocks);
+                    if !body.is_empty() {
+                        body.push('&');
+                    }
+                    body.push_str(&format!("button={}", percent_encode(&found.id)));
                     if let Some(ref auth) = found.auth {
                         // Look up stored token by service name; button works without one
                         match lookup_stored_token(auth) {
@@ -577,10 +604,22 @@ fn main() -> anyhow::Result<()> {
                 })
             }).collect();
 
+            // Build inputs output (matching Fill behavior)
+            let inputs: Vec<_> = doc_blocks.iter().filter_map(|b| match b {
+                Block::Input(input) => Some(serde_json::json!({
+                    "name": input.name,
+                    "label": input.label,
+                    "value": input.value,
+                    "placeholder": input.placeholder,
+                })),
+                _ => None,
+            }).collect();
+
             let manifest = serde_json::json!({
                 "url": format!("{}", target_url),
                 "title": result_doc.title(),
                 "button": button,
+                "inputs": inputs,
                 "blocks": blocks,
             });
 
@@ -594,7 +633,7 @@ fn main() -> anyhow::Result<()> {
             let initial = serde_json::json!({
                 "url": url,
                 "status": "session_started",
-                "blocks": session.document().blocks.iter().map(|b| block_summary_json(b)).collect::<Vec<_>>(),
+                "blocks": session.document().blocks.iter().map(block_summary_json).collect::<Vec<_>>(),
             });
             println!("{}", serde_json::to_string_pretty(&initial)?);
 
@@ -614,15 +653,14 @@ fn main() -> anyhow::Result<()> {
                         let mut updated = session.blocks.clone();
                         if let Some((name, value)) = rest.split_once('=') {
                             for block in &mut updated {
-                                if let Block::Input(input) = block {
-                                    if input.name == name.trim() {
+                                if let Block::Input(input) = block
+                                    && input.name == name.trim() {
                                         input.value = value.trim().to_string();
                                     }
-                                }
                             }
                         }
                         session.blocks = updated;
-                        serde_json::json!({"status": "filled", "blocks": session.document().blocks.iter().map(|b| block_summary_json(b)).collect::<Vec<_>>()})
+                        serde_json::json!({"status": "filled", "blocks": session.document().blocks.iter().map(block_summary_json).collect::<Vec<_>>()})
                     }
                     Some(("navigate", target)) => {
                         // Navigate to a new URL (relative or absolute)
@@ -636,14 +674,14 @@ fn main() -> anyhow::Result<()> {
                         match jaringan_browser::session::SessionState::start(&new_url) {
                             Ok(new_session) => {
                                 session = new_session;
-                                serde_json::json!({"status": "navigated", "url": session.url, "blocks": session.document().blocks.iter().map(|b| block_summary_json(b)).collect::<Vec<_>>()})
+                                serde_json::json!({"status": "navigated", "url": session.url, "blocks": session.document().blocks.iter().map(block_summary_json).collect::<Vec<_>>()})
                             }
                             Err(e) => serde_json::json!({"status": "error", "error": e}),
                         }
                     }
                     _ if line == "refresh" => {
                         match session.refresh() {
-                            Ok(()) => serde_json::json!({"status": "refreshed", "blocks": session.document().blocks.iter().map(|b| block_summary_json(b)).collect::<Vec<_>>()}),
+                            Ok(()) => serde_json::json!({"status": "refreshed", "blocks": session.document().blocks.iter().map(block_summary_json).collect::<Vec<_>>()}),
                             Err(e) => serde_json::json!({"status": "error", "error": e}),
                         }
                     }
@@ -678,11 +716,10 @@ fn main() -> anyhow::Result<()> {
             let (wasm, label) = match script {
                 Some(ref label) => {
                     let found = doc.blocks.iter().find_map(|b| {
-                        if let Block::Script { wasm, label: lbl } = b {
-                            if lbl.as_deref() == Some(label.as_str()) {
+                        if let Block::Script { wasm, label: lbl } = b
+                            && lbl.as_deref() == Some(label.as_str()) {
                                 return Some((wasm.clone(), lbl.clone()));
                             }
-                        }
                         None
                     });
                     match found {
@@ -862,14 +899,18 @@ fn main() -> anyhow::Result<()> {
                 PageLocation::Unsupported(target) => bail!("unsupported target: {target}"),
             }
         }
-        Command::Open { target } => {
-            let target = target.or_else(|| {
-                jaringan_browser::config::load()
+        Command::Open { targets } => {
+            let targets = if targets.is_empty() {
+                // Fall back to config default_target if nothing provided
+                let config_default = jaringan_browser::config::load()
                     .ok()
                     .flatten()
-                    .and_then(|c| c.default_target)
-            });
-            run_tui(target)?
+                    .and_then(|c| c.default_target);
+                config_default.map(|t| vec![t]).unwrap_or_default()
+            } else {
+                targets
+            };
+            run_tui(targets)?
         }
         Command::Plugins { dir } => {
             let dir = dir.unwrap_or_else(|| {
@@ -1521,14 +1562,14 @@ fn block_summary_json(block: &Block) -> serde_json::Value {
     })
 }
 
-fn run_tui(target: Option<String>) -> anyhow::Result<()> {
+fn run_tui(targets: Vec<String>) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, target);
+    let result = run_app(&mut terminal, targets);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -1539,7 +1580,7 @@ fn run_tui(target: Option<String>) -> anyhow::Result<()> {
 
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    target: Option<String>,
+    targets: Vec<String>,
 ) -> anyhow::Result<()> {
     // Load config
     let cfg = jaringan_browser::config::load()
@@ -1629,23 +1670,26 @@ fn run_app(
         eprintln!("[jaringan] warning: plugin loading: {e}");
     }
 
-    let (first, page) = match target {
-        Some(t) => {
-            let loc = parse_start_location(&t)?;
-            let p = load_location(&loc, &script_runtime, &bridge)?;
-            (p.location.clone(), p)
-        }
-        None => {
-            let doc = welcome_document();
-            let p = LoadedPage {
-                location: PageLocation::File(PathBuf::from("welcome")),
-                items: collect_items(&doc),
-                document: doc,
-                signature_status: SignatureStatus::Unsigned,
-                stream_rx: None,
-            };
-            (p.location.clone(), p)
-        }
+    let (first, page) = if targets.is_empty() {
+        // Welcome page
+        let doc = welcome_document();
+        let p = LoadedPage {
+            location: PageLocation::File(PathBuf::from("welcome")),
+            items: collect_items(&doc),
+            document: doc,
+            signature_status: SignatureStatus::Unsigned,
+            stream_rx: None,
+            raw_body: None,
+            content_type: String::new(),
+            body_size: 0,
+            load_time_ms: 0,
+        };
+        (p.location.clone(), p)
+    } else {
+        // First target is the active page
+        let loc = parse_start_location(&targets[0])?;
+        let p = load_location(&loc, &script_runtime, &bridge)?;
+        (p.location.clone(), p)
     };
 
     let mut state = BrowserState::new(first.clone(), cfg.clone());
@@ -1695,6 +1739,10 @@ fn run_app(
                                 document: doc,
                                 signature_status: SignatureStatus::Unsigned,
                                 stream_rx: None,
+                                raw_body: None,
+                                content_type: String::new(),
+                                body_size: 0,
+                                load_time_ms: 0,
                             };
                             let s = BrowserState::new(loc, cfg.clone());
                             tabs.push(Tab { page, state: s, file_mtime: None });
@@ -1712,6 +1760,23 @@ fn run_app(
     } else {
         tabs = vec![Tab { page, state, file_mtime }];
     }
+
+    // If extra targets, load them as additional tabs
+    for extra in targets.iter().skip(1) {
+        if let Ok(loc) = parse_start_location(extra)
+            && matches!(loc, PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_))
+                && let Ok(extra_page) = load_location(&loc, &script_runtime, &bridge) {
+                    let extra_location = extra_page.location.clone();
+                    let mut extra_state = BrowserState::new(extra_location.clone(), cfg.clone());
+                    extra_state.record_current(extra_page.document.title().unwrap_or("Untitled"));
+                    tabs.push(Tab {
+                        page: extra_page,
+                        state: extra_state,
+                        file_mtime: file_mtime_of(&extra_location),
+                    });
+                }
+    }
+
     let mut active_tab: usize = 0;
     let started = Instant::now();
 
@@ -1731,9 +1796,9 @@ fn run_app(
         }
 
         // Streaming blocks
-        if let Some(ref rx) = tab.page.stream_rx {
-            if let Ok(block) = rx.lock().unwrap().try_recv() {
-                if let Ok(new_doc) = parse_document(&block) {
+        if let Some(ref rx) = tab.page.stream_rx
+            && let Ok(block) = rx.lock().unwrap().try_recv()
+                && let Ok(new_doc) = parse_document(&block) {
                     let block_count = new_doc.blocks.len();
                     for b in new_doc.blocks {
                         tab.page.document.blocks.push(b);
@@ -1741,8 +1806,6 @@ fn run_app(
                     tab.page.items = collect_items(&tab.page.document);
                     tab.state.status = format!("Stream update: +{block_count} blocks");
                 }
-            }
-        }
 
         // Draw the current tab (immutable borrow of tabs from the stack)
         let frame_result = terminal.draw(|frame| {
@@ -1793,6 +1856,10 @@ fn handle_key_event(
                 document: doc,
                 signature_status: SignatureStatus::Unsigned,
                 stream_rx: None,
+                raw_body: None,
+                content_type: String::new(),
+                body_size: 0,
+                load_time_ms: 0,
             };
             let mut s = BrowserState::new(p.location.clone(), Default::default());
             s.record_current(p.document.title().unwrap_or("Untitled"));
@@ -1848,6 +1915,52 @@ fn handle_key_event(
 
     // ── Overlay handling ──────────────────────────────────────────
     if state.overlay.is_some() {
+        // GoTo overlay: capture all input for URL/path entry
+        if state.overlay == Some(jaringan_browser::Overlay::GoTo) {
+            match key.code {
+                KeyCode::Esc => {
+                    state.overlay = None;
+                    state.goto_buffer.clear();
+                    state.status = String::from("Cancelled");
+                }
+                KeyCode::Enter => {
+                    let url = state.goto_buffer.clone();
+                    if !url.is_empty() {
+                        let location = parse_start_location(&url).unwrap_or_else(|_| {
+                            PageLocation::Unsupported(url.clone())
+                        });
+                        if matches!(location, PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) {
+                            match load_location(&location, script_runtime, bridge) {
+                                Ok(loaded) => {
+                                    state.overlay = None;
+                                    navigate_to(state, loaded.location.clone());
+                                    state.record_current(loaded.document.title().unwrap_or("Untitled"));
+                                    state.status = format!("Navigated to {}", url);
+                                    *page = loaded;
+                                    *file_mtime = file_mtime_of(&page.location);
+                                }
+                                Err(e) => {
+                                    state.status = format!("Failed to load {}: {}", url, e);
+                                }
+                            }
+                        } else {
+                            state.status = format!("Unsupported location: {}", url);
+                        }
+                    }
+                    state.goto_buffer.clear();
+                }
+                KeyCode::Backspace => {
+                    state.goto_buffer.pop();
+                }
+                KeyCode::Char(ch) if !ch.is_control() => {
+                    state.goto_buffer.push(ch);
+                }
+                _ => {}
+            }
+            // Save changes back to tabs and return
+            tabs[*active_tab] = tab;
+            return Ok(());
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('h') | KeyCode::Char('?') => {
                 state.overlay = None;
@@ -1883,7 +1996,7 @@ fn handle_key_event(
                     });
                     if matches!(location, PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) {
                         state.status = format!("⠋ Loading {url}");
-                        let loaded = load_location(&location, script_runtime, &bridge)?;
+                        let loaded = load_location(&location, script_runtime, bridge)?;
                         navigate_to(state, loaded.location.clone());
                         state.record_current(loaded.document.title().unwrap_or("Untitled"));
                         state.status = "Opened from history".to_string();
@@ -1899,11 +2012,7 @@ fn handle_key_event(
                 } else {
                     state.find_state.query.push(ch);
                     state.find_state.matches = compute_find_matches(page, &state.find_state.query);
-                    state.find_state.match_idx = if state.find_state.matches.is_empty() {
-                        0
-                    } else {
-                        0
-                    };
+                    state.find_state.match_idx = 0;
                 }
             }
             KeyCode::Backspace
@@ -1911,11 +2020,7 @@ fn handle_key_event(
             {
                 state.find_state.query.pop();
                 state.find_state.matches = compute_find_matches(page, &state.find_state.query);
-                state.find_state.match_idx = if state.find_state.matches.is_empty() {
-                    0
-                } else {
-                    0
-                };
+                state.find_state.match_idx = 0;
             }
             _ => {}
         }
@@ -1957,6 +2062,22 @@ fn handle_key_event(
         KeyCode::Char('h') => toggle_overlay(state, jaringan_browser::Overlay::Help),
         KeyCode::Char('H') => toggle_overlay(state, jaringan_browser::Overlay::History),
         KeyCode::Char('B') => toggle_overlay(state, jaringan_browser::Overlay::Bookmarks),
+        KeyCode::Char('y') => {
+            let url = state.current.display_url();
+            if copy_to_clipboard(&url) {
+                state.status = "Copied URL to clipboard".to_string();
+            } else {
+                state.status = format!("Copy not available: {}", url);
+            }
+        }
+        KeyCode::Char('\\') | KeyCode::Char('u') if ctrl => {
+            state.show_source = !state.show_source;
+            state.status = if state.show_source {
+                "Source view".to_string()
+            } else {
+                "Rendered view".to_string()
+            };
+        }
         KeyCode::Char('f') if ctrl => {
             toggle_overlay(state, jaringan_browser::Overlay::Find);
             state.find_state = jaringan_browser::FindState {
@@ -1968,7 +2089,7 @@ fn handle_key_event(
         KeyCode::Down | KeyCode::Char('j') => match state.mode {
             BrowserMode::Selection => selection_down(state, page.items.len()),
             BrowserMode::Scroll => {
-                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state)).len();
+                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source).len();
                 if let Ok(size) = terminal.size() {
                     let viewport_height = size.height.saturating_sub(8);
                     scroll_down(state, line_count, viewport_height);
@@ -1982,7 +2103,7 @@ fn handle_key_event(
         KeyCode::PageDown | KeyCode::Char(' ') => match state.mode {
             BrowserMode::Selection => selection_down(state, page.items.len()),
             BrowserMode::Scroll => {
-                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state)).len();
+                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source).len();
                 if let Ok(size) = terminal.size() {
                     let viewport_height = size.height.saturating_sub(8);
                     scroll_page_down(state, line_count, viewport_height);
@@ -1992,7 +2113,7 @@ fn handle_key_event(
         KeyCode::PageUp => match state.mode {
             BrowserMode::Selection => selection_up(state),
             BrowserMode::Scroll => {
-                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state)).len();
+                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source).len();
                 if let Ok(size) = terminal.size() {
                     let viewport_height = size.height.saturating_sub(8);
                     scroll_page_up(state, line_count, viewport_height);
@@ -2001,9 +2122,13 @@ fn handle_key_event(
         },
         KeyCode::Home => selection_first(state),
         KeyCode::End => selection_last(state, page.items.len()),
-        KeyCode::Char('g') => scroll_to_top(state),
+        KeyCode::Char('g') if !ctrl => {
+            state.overlay = Some(jaringan_browser::Overlay::GoTo);
+            state.goto_buffer.clear();
+            state.status = String::from("Go to: (type URL or path, Enter to go, Esc to cancel)");
+        }
         KeyCode::Char('G') => {
-            let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state)).len();
+            let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source).len();
             if let Ok(size) = terminal.size() {
                 let viewport_height = size.height.saturating_sub(8);
                 scroll_to_bottom(state, line_count, viewport_height);
@@ -2015,8 +2140,11 @@ fn handle_key_event(
         KeyCode::Char('i') if ctrl => {
             toggle_overlay(state, jaringan_browser::Overlay::PageInfo);
         }
+        KeyCode::Char('l') if ctrl => {
+            terminal.clear()?;
+        }
         KeyCode::Enter => {
-            activate_selected(state, page, script_runtime, &bridge)?;
+            activate_selected(state, page, script_runtime, bridge)?;
             *file_mtime = file_mtime_of(&page.location);
         }
         KeyCode::Char('b') | KeyCode::Backspace => {
@@ -2044,7 +2172,7 @@ fn handle_key_event(
             }
         }
         KeyCode::Char('r') => {
-            *page = load_location(&page.location, script_runtime, &bridge)?;
+            *page = load_location(&page.location, script_runtime, bridge)?;
             *file_mtime = file_mtime_of(&page.location);
             state.status = String::from("Reloaded");
         }
@@ -2166,7 +2294,7 @@ fn draw_frame(
 
     // ── Body ───────────────────────────────────────────────────────
     let find_color = parse_color(&cfg.theme.find_highlight);
-    let body = Paragraph::new(render_lines(page, state.selected, &state.find_state, find_color))
+    let body = Paragraph::new(render_lines(page, state.selected, &state.find_state, find_color, state.show_source))
         .block(
             TuiBlock::default()
                 .borders(Borders::LEFT | Borders::RIGHT)
@@ -2178,16 +2306,24 @@ fn draw_frame(
 
     // ── Footer ─────────────────────────────────────────────────────
     let spinner = spinner(elapsed);
-    let mode_label = match state.mode {
-        BrowserMode::Selection => "SEL",
-        BrowserMode::Scroll => "SCR",
+    let mode_label = if state.show_source {
+        "SRC"
+    } else {
+        match state.mode {
+            BrowserMode::Selection => "SEL",
+            BrowserMode::Scroll => "SCR",
+        }
     };
-    let mode_color = match state.mode {
-        BrowserMode::Selection => Color::Green,
-        BrowserMode::Scroll => Color::Yellow,
+    let mode_color = if state.show_source {
+        Color::Cyan
+    } else {
+        match state.mode {
+            BrowserMode::Selection => Color::Green,
+            BrowserMode::Scroll => Color::Yellow,
+        }
     };
 
-    let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state)).len();
+    let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source).len();
     let viewport_height = main_chunks[2].height.saturating_sub(2);
     let pct = if line_count > viewport_height as usize {
         ((state.scroll_offset as f64)
@@ -2209,31 +2345,43 @@ fn draw_frame(
             state.find_state.matches.len(),
         )
     } else {
-        "j/k ↓↑ • Enter ↵ • H history • B bookmarks • Ctrl+f find • Ctrl+i info • Ctrl+t tab • ? help • q quit"
+        "j/k ↓↑ • Enter ↵ • g goto • y copy url • H history • B bookmarks • Ctrl+f find • Ctrl+i info • Ctrl+t tab • ? help • q quit"
             .to_string()
     };
 
-    let footer = Paragraph::new(Line::from(vec![
-        Span::styled(format!(" {spinner} "), Style::default().fg(Color::Magenta)),
-        Span::styled(
-            format!(" {mode_label} "),
-            Style::default().fg(Color::Black).bg(mode_color).bold(),
-        ),
-        Span::raw(" "),
-        Span::styled(&state.status, Style::default().fg(Color::Yellow)),
-        Span::raw(" · "),
-        Span::styled(format!("{pct}%"), Style::default().fg(Color::DarkGray)),
-        Span::raw("  "),
-        Span::styled(
-            &help_text,
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            state.current.display_url(),
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
-        ),
-    ]))
+    // Build the footer stats line
+            let stats = format!(
+                "{} · {}B · {}ms",
+                tabs[active_tab].page.content_type,
+                tabs[active_tab].page.body_size,
+                tabs[active_tab].page.load_time_ms
+            );
+            let footer = Paragraph::new(Line::from(vec![
+                Span::styled(format!(" {spinner} "), Style::default().fg(Color::Magenta)),
+                Span::styled(
+                    format!(" {mode_label} "),
+                    Style::default().fg(Color::Black).bg(mode_color).bold(),
+                ),
+                Span::raw(" "),
+                Span::styled(&state.status, Style::default().fg(Color::Yellow)),
+                Span::raw(" · "),
+                Span::styled(format!("{pct}%"), Style::default().fg(Color::DarkGray)),
+                Span::raw("  "),
+                Span::styled(
+                    &help_text,
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    &stats,
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    state.current.display_url(),
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                ),
+            ]))
     .block(
         TuiBlock::default()
             .borders(Borders::ALL)
@@ -2250,6 +2398,7 @@ fn draw_frame(
         Some(jaringan_browser::Overlay::PageInfo) => {
             draw_page_info_overlay(frame, state, page)
         }
+        Some(jaringan_browser::Overlay::GoTo) => draw_goto_overlay(frame, state),
         None => {}
     }
 }
@@ -2303,7 +2452,7 @@ fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage, script_run
         InteractiveItem::Link { label, target } => match resolve_target(&page.location, &target) {
             location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
                 state.status = format!("⠋ Loading {}", location.display_url());
-                let loaded = load_location(&location, script_runtime, &bridge)?;
+                let loaded = load_location(&location, script_runtime, bridge)?;
                 navigate_to(state, loaded.location.clone());
                 state.record_current(loaded.document.title().unwrap_or("Untitled"));
                 state.status = format!("Opened {label}");
@@ -2399,6 +2548,10 @@ fn activate_button(
                 document,
                 signature_status: SignatureStatus::Unsigned,
                 stream_rx: None,
+                raw_body: None,
+                content_type: "jrg".to_string(),
+                body_size: 0,
+                load_time_ms: 0,
             };
         }
         (PageLocation::File(current_file), ActionMethod::Post) => {
@@ -2428,6 +2581,10 @@ fn activate_button(
                 document,
                 signature_status: SignatureStatus::Unsigned,
                 stream_rx: None,
+                raw_body: None,
+                content_type: "jrg".to_string(),
+                body_size: 0,
+                load_time_ms: 0,
             };
         }
         (PageLocation::File(current_file), ActionMethod::Get) if target == "/search" => {
@@ -2443,6 +2600,10 @@ fn activate_button(
                 document,
                 signature_status: SignatureStatus::Unsigned,
                 stream_rx: None,
+                raw_body: None,
+                content_type: "jrg".to_string(),
+                body_size: 0,
+                load_time_ms: 0,
             };
         }
         _ => {
@@ -2492,6 +2653,21 @@ fn edit_selected_input(state: &mut BrowserState, page: &mut LoadedPage, edit: In
 fn input_payload(page: &LoadedPage) -> String {
     page.document
         .blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Input(input) => Some(format!(
+                "{}={}",
+                percent_encode(&input.name),
+                percent_encode(&input.value)
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn input_payload_from_blocks(blocks: &[Block]) -> String {
+    blocks
         .iter()
         .filter_map(|block| match block {
             Block::Input(input) => Some(format!(
@@ -2614,16 +2790,20 @@ fn render_activated_image(page_location: &PageLocation, image: &Image) -> String
             return format!("Could not create image cache: {e}");
         }
         let output_path = cache_dir.join(cache_filename_for_url(&image.source));
-        let status = std::process::Command::new("curl")
-            .args(["--fail", "--location", "--silent", "--show-error", "--output"])
-            .arg(&output_path)
-            .arg(&image.source)
-            .status();
-        match status {
-            Ok(s) if s.success() => output_path,
-            Ok(s) => return format!("Image download failed with status: {s}"),
-            Err(e) => return format!("Image download requires curl: {e}"),
+        let response = match reqwest::blocking::get(&image.source) {
+            Ok(r) => r,
+            Err(e) => return format!("Failed to download image: {e}"),
+        };
+        let bytes = match response.bytes() {
+            Ok(b) => b,
+            Err(e) => return format!("Failed to read image data: {e}"),
+        };
+        let size = bytes.len();
+        if let Err(e) = fs::write(&output_path, &bytes) {
+            return format!("Failed to save image: {e}");
         }
+        eprintln!("Downloaded image: {} ({} bytes)", output_path.display(), size);
+        output_path
     } else {
         let PageLocation::File(page_path) = page_location else {
             return image_status(page_location, image);
@@ -2672,28 +2852,26 @@ fn download_remote_image(url: &str) -> String {
     }
 
     let output_path = cache_dir.join(cache_filename_for_url(url));
-    let status = std::process::Command::new("curl")
-        .args([
-            "--fail",
-            "--location",
-            "--silent",
-            "--show-error",
-            "--output",
-        ])
-        .arg(&output_path)
-        .arg(url)
-        .status();
-
-    match status {
-        Ok(status) if status.success() => format!("Downloaded image: {}", output_path.display()),
-        Ok(status) => format!("Image download failed with status: {status}"),
-        Err(error) => format!("Image download requires curl: {error}"),
+    match reqwest::blocking::get(url) {
+        Ok(response) => {
+            match response.bytes() {
+                Ok(bytes) => {
+                    let size = bytes.len();
+                    match fs::write(&output_path, &bytes) {
+                        Ok(()) => format!("Downloaded image: {} ({} bytes)", output_path.display(), size),
+                        Err(e) => format!("Failed to save image: {e}"),
+                    }
+                }
+                Err(e) => format!("Failed to read image data: {e}"),
+            }
+        }
+        Err(e) => format!("Failed to download image: {e}"),
     }
 }
 
 fn run_page_scripts(runtime: &Option<WasmRuntime>, doc: &mut Document, bridge: &Option<BridgeState>) {
-    if let Some(rt) = runtime.as_ref() {
-        if doc.blocks.iter().any(|b| matches!(b, Block::Script { .. })) {
+    if let Some(rt) = runtime.as_ref()
+        && doc.blocks.iter().any(|b| matches!(b, Block::Script { .. })) {
             match execute_document_scripts(rt, doc, bridge.as_ref()) {
                 Ok(blocks) => {
                     let meta = doc.metadata.take();
@@ -2704,7 +2882,6 @@ fn run_page_scripts(runtime: &Option<WasmRuntime>, doc: &mut Document, bridge: &
                 }
             }
         }
-    }
 }
 
 fn load_location(
@@ -2748,17 +2925,134 @@ fn load_web_page(url: &str, keyring: &PublicKeyring) -> anyhow::Result<LoadedPag
         items,
         signature_status: verify_source_signature(&response.body, keyring),
         stream_rx: None,
+        raw_body: Some(response.body.clone()),
+        content_type: "web".to_string(),
+        body_size: response.body.len(),
+        load_time_ms: 0,
     })
+}
+
+/// Convert a minimal subset of markdown to JRG blocks.
+/// Handles: #/##/### headings, paragraphs, and - / * lists.
+fn md_to_jrg_blocks(source: &str) -> Vec<Block> {
+    let mut blocks = Vec::new();
+    let mut para_lines = Vec::new();
+    let mut list_items = Vec::new();
+    let mut in_list = false;
+
+    fn flush_para(blocks: &mut Vec<Block>, lines: &mut Vec<String>) {
+        if !lines.is_empty() {
+            blocks.push(Block::Paragraph(lines.join(" ")));
+            lines.clear();
+        }
+    }
+
+    fn flush_list(blocks: &mut Vec<Block>, items: &mut Vec<String>) {
+        if !items.is_empty() {
+            blocks.push(Block::List(items.clone()));
+            items.clear();
+        }
+    }
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if in_list {
+                flush_list(&mut blocks, &mut list_items);
+                in_list = false;
+            } else {
+                flush_para(&mut blocks, &mut para_lines);
+            }
+            continue;
+        }
+
+        // Heading
+        if let Some(rest) = trimmed.strip_prefix("# ") {
+            flush_para(&mut blocks, &mut para_lines);
+            flush_list(&mut blocks, &mut list_items);
+            in_list = false;
+            blocks.push(Block::Heading { level: 1, text: rest.to_string() });
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("## ") {
+            flush_para(&mut blocks, &mut para_lines);
+            flush_list(&mut blocks, &mut list_items);
+            in_list = false;
+            blocks.push(Block::Heading { level: 2, text: rest.to_string() });
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("### ") {
+            flush_para(&mut blocks, &mut para_lines);
+            flush_list(&mut blocks, &mut list_items);
+            in_list = false;
+            blocks.push(Block::Heading { level: 3, text: rest.to_string() });
+            continue;
+        }
+
+        // List items
+        let list_trimmed = trimmed.trim_start();
+        if list_trimmed.starts_with("- ") || list_trimmed.starts_with("* ") || list_trimmed.starts_with("+ ") {
+            flush_para(&mut blocks, &mut para_lines);
+            if !in_list {
+                flush_list(&mut blocks, &mut list_items);
+            }
+            in_list = true;
+            list_items.push(list_trimmed[2..].to_string());
+            continue;
+        }
+
+        // Paragraph
+        if in_list {
+            flush_list(&mut blocks, &mut list_items);
+            in_list = false;
+        }
+        para_lines.push(trimmed.to_string());
+    }
+
+    // Flush remaining
+    if in_list {
+        flush_list(&mut blocks, &mut list_items);
+    } else {
+        flush_para(&mut blocks, &mut para_lines);
+    }
+
+    blocks
 }
 
 fn load_file_page_with_keyring(path: &Path, keyring: &PublicKeyring) -> anyhow::Result<LoadedPage> {
     let path = canonicalish(path);
 
-    if path.extension().and_then(|ext| ext.to_str()) != Some("jrg") {
-        // Non-.jrg files: load as plain text
-        let source = fs::read_to_string(&path)
+    if path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext == "jrg") {
+        // .jrg files: parse as JRG document
+        let source =
+            fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let document = Document::new(vec![Block::Preformatted { code: source, language: None }]);
+        let document =
+            parse_document(&source).with_context(|| format!("failed to parse {}", path.display()))?;
+        let items = collect_items(&document);
+        let signature_status = verify_source_signature(&source, keyring);
+        return Ok(LoadedPage {
+            location: PageLocation::File(path),
+            document,
+            items,
+            signature_status,
+            stream_rx: None,
+            raw_body: Some(source.clone()),
+            content_type: "jrg".to_string(),
+            body_size: source.len(),
+            load_time_ms: 0,
+        });
+    }
+
+    // Non-.jrg files
+    let source = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let raw_body = source.clone();
+    let body_size = raw_body.len();
+
+    // .md files: render as JRG blocks via basic markdown conversion
+    if path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext == "md") {
+        let document = Document::new(md_to_jrg_blocks(&source));
         let items = collect_items(&document);
         return Ok(LoadedPage {
             location: PageLocation::File(path),
@@ -2766,21 +3060,26 @@ fn load_file_page_with_keyring(path: &Path, keyring: &PublicKeyring) -> anyhow::
             items,
             signature_status: SignatureStatus::Unsigned,
             stream_rx: None,
+            raw_body: Some(raw_body),
+            content_type: "markdown".to_string(),
+            body_size,
+            load_time_ms: 0,
         });
     }
-    let source =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let document =
-        parse_document(&source).with_context(|| format!("failed to parse {}", path.display()))?;
-    let items = collect_items(&document);
-    let signature_status = verify_source_signature(&source, keyring);
 
+    // All other non-.jrg files: load as plain text
+    let document = Document::new(vec![Block::Preformatted { code: source, language: None }]);
+    let items = collect_items(&document);
     Ok(LoadedPage {
         location: PageLocation::File(path),
         document,
         items,
-        signature_status,
+        signature_status: SignatureStatus::Unsigned,
         stream_rx: None,
+        raw_body: Some(raw_body),
+        content_type: "text".to_string(),
+        body_size,
+        load_time_ms: 0,
     })
 }
 
@@ -2865,6 +3164,10 @@ fn load_network_page_with_keyring(
             items,
             signature_status: verify_source_signature(&response.body, keyring),
             stream_rx,
+            raw_body: Some(response.body.clone()),
+            content_type: "jrg".to_string(),
+            body_size: response.body.len(),
+            load_time_ms: 0,
         });
     }
 
@@ -2896,6 +3199,10 @@ fn network_error_page(location: JaringanUrl, message: String) -> LoadedPage {
         items: Vec::new(),
         signature_status: SignatureStatus::Unsigned,
         stream_rx: None,
+        raw_body: None,
+        content_type: "error".to_string(),
+        body_size: 0,
+        load_time_ms: 0,
     }
 }
 
@@ -3010,26 +3317,92 @@ fn security_style(status: &SignatureStatus) -> Style {
     }
 }
 
+/// A span within a paragraph — either plain text or an inline link.
+enum InlineSpan {
+    Text(String),
+    Link { label: String, target: String },
+}
+
+/// Split paragraph text into inline spans, extracting `[label](target)` links.
+fn split_inline_spans(text: &str) -> Vec<InlineSpan> {
+    let mut spans = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    let mut last_end = 0;
+
+    while i < chars.len() {
+        if chars[i] == '[' {
+            // Try to find a full [label](target) pattern
+            if let Some(end_label) = chars[i + 1..].iter().position(|&c| c == ']') {
+                let label_end = i + 1 + end_label;
+                if label_end + 1 < chars.len() && chars[label_end + 1] == '('
+                    && let Some(end_url) =
+                        chars[label_end + 2..].iter().position(|&c| c == ')')
+                    {
+                        let url_end = label_end + 2 + end_url;
+                        let label: String = chars[i + 1..label_end].iter().collect();
+                        let target: String = chars[label_end + 2..url_end].iter().collect();
+                        if !label.is_empty() && !target.is_empty() {
+                            // Push any preceding text
+                            if last_end < i {
+                                spans.push(InlineSpan::Text(
+                                    chars[last_end..i].iter().collect(),
+                                ));
+                            }
+                            spans.push(InlineSpan::Link { label, target });
+                            i = url_end + 1;
+                            last_end = i;
+                            continue;
+                        }
+                    }
+            }
+        }
+        i += 1;
+    }
+
+    // Push remaining text
+    if last_end < chars.len() {
+        spans.push(InlineSpan::Text(chars[last_end..].iter().collect()));
+    }
+
+    spans
+}
+
+/// Extract `[label](target)` patterns from paragraph text.
+fn extract_inline_links(text: &str) -> Vec<(String, String)> {
+    split_inline_spans(text)
+        .into_iter()
+        .filter_map(|span| match span {
+            InlineSpan::Link { label, target } => Some((label, target)),
+            _ => None,
+        })
+        .collect()
+}
+
 fn collect_items(document: &Document) -> Vec<InteractiveItem> {
     document
         .blocks
         .iter()
-        .filter_map(|block| match block {
-            Block::Link(link) => Some(InteractiveItem::Link {
+        .flat_map(|block| match block {
+            Block::Link(link) => vec![InteractiveItem::Link {
                 label: link.label.clone(),
                 target: link.target.clone(),
-            }),
-            Block::Input(input) => Some(InteractiveItem::Input(input.clone())),
-            Block::Button(button) => Some(InteractiveItem::Button(ButtonAction {
+            }],
+            Block::Input(input) => vec![InteractiveItem::Input(input.clone())],
+            Block::Button(button) => vec![InteractiveItem::Button(ButtonAction {
                 id: button.id.clone(),
                 label: button.label.clone(),
                 target: button.target.clone(),
                 method: button.method,
                 confirm: button.confirm.clone(),
                 auth: button.auth.clone(),
-            })),
-            Block::Image(image) => Some(InteractiveItem::Image(image.clone())),
-            _ => None,
+            })],
+            Block::Image(image) => vec![InteractiveItem::Image(image.clone())],
+            Block::Paragraph(text) => extract_inline_links(text)
+                .into_iter()
+                .map(|(label, target)| InteractiveItem::Link { label, target })
+                .collect(),
+            _ => vec![],
         })
         .collect()
 }
@@ -3170,6 +3543,39 @@ fn draw_find_overlay(frame: &mut ratatui::Frame<'_>, state: &BrowserState) {
     frame.render_widget(block, overlay_area[1]);
 }
 
+/// Draw the "go to" overlay — shows a URL/path input bar.
+fn draw_goto_overlay(frame: &mut ratatui::Frame<'_>, state: &BrowserState) {
+    let area = frame.area();
+    let overlay_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(3)])
+        .split(area);
+
+    let cursor_hint = if state.goto_buffer.is_empty() {
+        String::from("  Type a URL or file path...")
+    } else {
+        String::from("")
+    };
+
+    let text = format!(
+        "Go to: {}{}",
+        state.goto_buffer, cursor_hint,
+    );
+
+    let block = Paragraph::new(text)
+        .block(
+            TuiBlock::default()
+                .title(" 🌐 Go To ")
+                .title_alignment(ratatui::layout::Alignment::Center)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan).bold()),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, overlay_area[1]);
+    frame.render_widget(block, overlay_area[1]);
+}
+
 /// Scan rendered line text for a query and return the line indices that match.
 fn compute_find_matches(page: &LoadedPage, query: &str) -> Vec<usize> {
     if query.is_empty() {
@@ -3182,7 +3588,7 @@ fn compute_find_matches(page: &LoadedPage, query: &str) -> Vec<usize> {
         matches: Vec::new(),
         match_idx: 0,
     };
-    let lines = render_lines(page, 0, &dummy, Color::Reset);
+    let lines = render_lines(page, 0, &dummy, Color::Reset, false);
     lines
         .iter()
         .enumerate()
@@ -3219,7 +3625,7 @@ fn draw_page_info_overlay(
         matches: Vec::new(),
         match_idx: 0,
     };
-    let line_count = render_lines(page, state.selected, &dummy, Color::Reset).len();
+    let line_count = render_lines(page, state.selected, &dummy, Color::Reset, false).len();
 
     let text = format!(
         "  Title: {title}\n  \
@@ -3235,7 +3641,7 @@ fn draw_page_info_overlay(
             BrowserMode::Scroll => "Scroll",
         },
         scroll = state.scroll_offset,
-        max = line_count.saturating_sub(1).max(0),
+        max = line_count.saturating_sub(1),
     );
 
     let block = Paragraph::new(text)
@@ -3252,7 +3658,25 @@ fn draw_page_info_overlay(
     frame.render_widget(block, overlay_area[1]);
 }
 
-fn render_lines(page: &LoadedPage, selected: usize, find_state: &FindState, find_color: Color) -> Vec<Line<'static>> {
+fn render_lines(page: &LoadedPage, selected: usize, find_state: &FindState, find_color: Color, show_source: bool) -> Vec<Line<'static>> {
+    if show_source
+        && let Some(ref raw) = page.raw_body {
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    "── Source view ──",
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                )),
+                Line::raw(""),
+            ];
+            for line_text in raw.lines() {
+                lines.push(Line::from(Span::styled(
+                    line_text.to_string(),
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+            return lines;
+        }
+
     let mut lines = Vec::new();
     let mut item_index = 0usize;
 
@@ -3271,11 +3695,46 @@ fn render_lines(page: &LoadedPage, selected: usize, find_state: &FindState, find
                 lines.push(Line::raw(""));
             }
             Block::Paragraph(text) => {
-                lines.push(Line::from(Span::styled(
-                    text.clone(),
-                    Style::default().fg(Color::Gray),
-                )));
-                lines.push(Line::raw(""));
+                let spans = split_inline_spans(text);
+                if spans.is_empty() {
+                    // Empty paragraph
+                    lines.push(Line::raw(""));
+                    lines.push(Line::raw(""));
+                } else if spans.iter().all(|s| matches!(s, InlineSpan::Text(_))) {
+                    // No inline links — render as before
+                    lines.push(Line::from(Span::styled(
+                        text.clone(),
+                        Style::default().fg(Color::Gray),
+                    )));
+                    lines.push(Line::raw(""));
+                } else {
+                    // Has inline links — build a line with mixed spans
+                    let mut line_spans: Vec<Span<'static>> = Vec::new();
+                    for span in spans {
+                        match span {
+                            InlineSpan::Text(t) => {
+                                line_spans.push(Span::styled(
+                                    t,
+                                    Style::default().fg(Color::Gray),
+                                ));
+                            }
+                            InlineSpan::Link { label, target: _ } => {
+                                let style = if selected == item_index {
+                                    Style::default()
+                                        .fg(Color::Black)
+                                        .bg(Color::Green)
+                                        .add_modifier(Modifier::BOLD)
+                                } else {
+                                    Style::default().fg(Color::Green)
+                                };
+                                line_spans.push(Span::styled(label, style));
+                                item_index += 1;
+                            }
+                        }
+                    }
+                    lines.push(Line::from(line_spans));
+                    lines.push(Line::raw(""));
+                }
             }
             Block::Link(link) => {
                 lines.push(selectable_line(
@@ -3583,8 +4042,8 @@ fn help_lines() -> Vec<Line<'static>> {
             Span::raw("  Page down / up"),
         ]),
         Line::from(vec![
-            Span::styled("  g / G", Style::default().fg(Color::Yellow)),
-            Span::raw("       Top / Bottom"),
+            Span::styled("  g", Style::default().fg(Color::Yellow)),
+            Span::raw("         Go to URL / path"),
         ]),
         Line::raw(""),
         Line::from(Span::styled(
@@ -3699,18 +4158,16 @@ fn cmd_script_build(
     // Print build output in real-time
     if let Some(stdout) = child.stdout.take() {
         let reader = BufReader::new(stdout);
-        for line in reader.lines() {
-            if let Ok(l) = line {
-                println!("{l}");
-            }
+        #[allow(clippy::lines_filter_map_ok)]
+        for l in reader.lines().filter_map(Result::ok) {
+            println!("{l}");
         }
     }
     if let Some(stderr) = child.stderr.take() {
         let reader = BufReader::new(stderr);
-        for line in reader.lines() {
-            if let Ok(l) = line {
-                eprintln!("{l}");
-            }
+        #[allow(clippy::lines_filter_map_ok)]
+        for l in reader.lines().filter_map(Result::ok) {
+            eprintln!("{l}");
         }
     }
 
@@ -3980,6 +4437,10 @@ fn load_directory_page(path: &Path, _keyring: &PublicKeyring) -> anyhow::Result<
         document,
         signature_status: SignatureStatus::Unsigned,
         stream_rx: None,
+        raw_body: None,
+        content_type: "dir".to_string(),
+        body_size: 0,
+        load_time_ms: 0,
     })
 }
 
@@ -4020,7 +4481,7 @@ fn check_live_reload(
     let Some(current_mtime) = file_mtime_of(&page.location) else {
         return;
     };
-    let changed = file_mtime.map_or(true, |prev| current_mtime != prev);
+    let changed = file_mtime.is_none_or(|prev| current_mtime != prev);
     if !changed {
         return;
     }
@@ -4030,6 +4491,38 @@ fn check_live_reload(
         state.record_current(page.document.title().unwrap_or("Untitled"));
         state.status = String::from("⚡ Reloaded (file changed)");
     }
+}
+
+// ── Clipboard ────────────────────────────────────────────────────────
+
+/// Copy text to the system clipboard. Tries wl-copy (Wayland) then xclip (X11).
+/// Returns true if the copy succeeded, false if neither tool was available.
+fn copy_to_clipboard(text: &str) -> bool {
+    use std::process::{Command, Stdio};
+    use std::io::Write;
+
+    for cmd in &["wl-copy", "xclip"] {
+        let args: &[&str] = if *cmd == "xclip" {
+            &["-selection", "clipboard"]
+        } else {
+            &[]
+        };
+        if let Ok(mut child) = Command::new(cmd)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            if child.wait().map(|s| s.success()).unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -4131,7 +4624,7 @@ mod tests {
         assert!(rendered.contains("Navigation"));
         assert!(rendered.contains("? / h"));
         assert!(rendered.contains("Back / Forward"));
-        assert!(rendered.contains("g / G"));
+        assert!(rendered.contains("Go to URL"));
     }
 
     #[test]
@@ -4146,13 +4639,17 @@ mod tests {
             document,
             signature_status: SignatureStatus::Unsigned,
             stream_rx: None,
+            raw_body: None,
+            content_type: String::new(),
+            body_size: 0,
+            load_time_ms: 0,
         };
 
         let rendered = render_lines(&page, 0, &FindState {
             query: String::new(),
             matches: Vec::new(),
             match_idx: 0,
-        }, Color::Reset)
+        }, Color::Reset, false)
             .into_iter()
             .map(|line| {
                 line.spans
@@ -4191,6 +4688,10 @@ mod tests {
             document,
             signature_status: SignatureStatus::Unsigned,
             stream_rx: None,
+            raw_body: None,
+            content_type: String::new(),
+            body_size: 0,
+            load_time_ms: 0,
         };
         let mut state = BrowserState::new(page.location.clone(), Default::default());
         state.selected = 1;
@@ -4233,6 +4734,10 @@ mod tests {
             document,
             signature_status: SignatureStatus::Unsigned,
             stream_rx: None,
+            raw_body: None,
+            content_type: String::new(),
+            body_size: 0,
+            load_time_ms: 0,
         };
         let mut state = BrowserState::new(page.location.clone(), Default::default());
         state.selected = 1;
@@ -4265,6 +4770,10 @@ mod tests {
             document,
             signature_status: SignatureStatus::Unsigned,
             stream_rx: None,
+            raw_body: None,
+            content_type: String::new(),
+            body_size: 0,
+            load_time_ms: 0,
         };
         let mut state = BrowserState::new(page.location.clone(), Default::default());
 
@@ -4351,6 +4860,10 @@ mod tests {
             document,
             signature_status: SignatureStatus::Unsigned,
             stream_rx: None,
+            raw_body: None,
+            content_type: String::new(),
+            body_size: 0,
+            load_time_ms: 0,
         };
         let mut state = BrowserState::new(page.location.clone(), Default::default());
         state.selected = 1;
