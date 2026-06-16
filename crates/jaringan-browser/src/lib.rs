@@ -186,6 +186,13 @@ pub struct ActionConfirmation {
     pub target: String,
 }
 
+/// Position in rendered text for text selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextSelectPos {
+    pub row: u16,
+    pub col: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserState {
     pub current: PageLocation,
@@ -204,6 +211,9 @@ pub struct BrowserState {
     pub config: Config,
     pub goto_buffer: String,
     pub show_source: bool,
+    pub text_select_active: bool,
+    pub text_select_start: TextSelectPos,
+    pub text_select_end: TextSelectPos,
 }
 
 impl BrowserState {
@@ -231,6 +241,9 @@ impl BrowserState {
             config,
             goto_buffer: String::new(),
             show_source: false,
+            text_select_active: false,
+            text_select_start: TextSelectPos { row: 0, col: 0 },
+            text_select_end: TextSelectPos { row: 0, col: 0 },
         }
     }
 

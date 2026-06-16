@@ -16,8 +16,9 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use crossterm::event::{EnableMouseCapture, DisableMouseCapture};
 use jaringan_browser::{
-    ActionConfirmation, BrowserMode, BrowserState, FindState, PageLocation, SavedTab,
+    ActionConfirmation, BrowserMode, BrowserState, FindState, PageLocation, SavedTab, TextSelectPos,
     cache_filename_for_url, config::parse_color, go_back, go_forward, load_tabs, navigate_to,
     resolve_target, save_tabs, scroll_down, scroll_page_down, scroll_page_up, scroll_to_bottom,
     scroll_up, selection_down, selection_first, selection_last, selection_up,
@@ -1565,14 +1566,14 @@ fn block_summary_json(block: &Block) -> serde_json::Value {
 fn run_tui(targets: Vec<String>) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = run_app(&mut terminal, targets);
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     result
@@ -1827,6 +1828,9 @@ fn run_app(
             Event::Key(key) => {
                 handle_key_event(&mut tabs, &mut active_tab, terminal, key, &script_runtime, &bridge, &mut plugin_registry)?;
             }
+            Event::Mouse(mouse) => {
+                handle_mouse_event(&mut tabs, &mut active_tab, mouse, &script_runtime, &bridge)?;
+            }
             Event::Resize(_, _) => {}
             _ => {}
         }
@@ -2027,6 +2031,70 @@ fn handle_key_event(
         return Ok(());
     }
 
+    // ── Text selection mode ────────────────────────────────────────
+    if state.text_select_active {
+        match key.code {
+            KeyCode::Char('V') | KeyCode::Esc => {
+                state.text_select_active = false;
+                state.status = String::from("Text selection off");
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                state.text_select_end.col = state.text_select_end.col.saturating_sub(1);
+                state.status = format!("Select: row {} col {}", state.text_select_end.row, state.text_select_end.col);
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                state.text_select_end.col = state.text_select_end.col.saturating_add(1);
+                state.status = format!("Select: row {} col {}", state.text_select_end.row, state.text_select_end.col);
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                state.text_select_end.row = state.text_select_end.row.saturating_add(1);
+                state.status = format!("Select: row {} col {}", state.text_select_end.row, state.text_select_end.col);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                state.text_select_end.row = state.text_select_end.row.saturating_sub(1);
+                state.status = format!("Select: row {} col {}", state.text_select_end.row, state.text_select_end.col);
+            }
+            KeyCode::Char('0') => {
+                state.text_select_end.col = 0;
+            }
+            KeyCode::Char('$') => {
+                state.text_select_end.col = u16::MAX;
+            }
+            KeyCode::Char('y') | KeyCode::Enter => {
+                // Build the selected text from rendered lines
+                let find_color = find_color_for(state);
+                let lines = render_lines(page, state.selected, &state.find_state, find_color, state.show_source);
+                let selected_text = extract_selected_text(&lines, state.text_select_start, state.text_select_end);
+                if !selected_text.is_empty() {
+                    if copy_to_clipboard(&selected_text) {
+                        state.status = format!("Copied selection ({} chars)", selected_text.chars().count());
+                    } else {
+                        // Print to stdout as fallback — gets lost in TUI, but status bar shows it
+                        eprintln!("[jaringan] selection: {selected_text}");
+                        state.status = format!("Selection ({} chars, clipboard unavailable)", selected_text.chars().count());
+                    }
+                } else {
+                    state.status = String::from("Nothing selected");
+                }
+                state.text_select_active = false;
+            }
+            KeyCode::Char('g') => {
+                // gg → go to first line
+                state.text_select_end.row = 0;
+                state.text_select_end.col = 0;
+            }
+            KeyCode::Char('G') => {
+                // G → go to last line
+                let find_color = find_color_for(state);
+                let line_count = render_lines(page, state.selected, &state.find_state, find_color, state.show_source).len();
+                state.text_select_end.row = line_count.saturating_sub(1) as u16;
+            }
+            _ => {}
+        }
+        tabs[*active_tab] = tab;
+        return Ok(());
+    }
+
     // ── Main keybindings ──────────────────────────────────────────
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => {
@@ -2058,6 +2126,12 @@ fn handle_key_event(
         KeyCode::Tab => toggle_mode(state),
         KeyCode::Char('s') => switch_mode(state, BrowserMode::Scroll),
         KeyCode::Char('v') => switch_mode(state, BrowserMode::Selection),
+        KeyCode::Char('V') => {
+            state.text_select_active = true;
+            state.text_select_start = TextSelectPos { row: 0, col: 0 };
+            state.text_select_end = TextSelectPos { row: 0, col: 0 };
+            state.status = String::from("Text selection: h/j/k/l to move, y to copy, Esc to cancel");
+        }
         KeyCode::Char('?') => toggle_overlay(state, jaringan_browser::Overlay::Help),
         KeyCode::Char('h') => toggle_overlay(state, jaringan_browser::Overlay::Help),
         KeyCode::Char('H') => toggle_overlay(state, jaringan_browser::Overlay::History),
@@ -2240,6 +2314,135 @@ fn handle_key_event(
     Ok(())
 }
 
+/// Handle mouse events for scrolling, clicking links/buttons, and tab switching.
+fn handle_mouse_event(
+    tabs: &mut Vec<Tab>,
+    active_tab: &mut usize,
+    mouse: crossterm::event::MouseEvent,
+    script_runtime: &Option<WasmRuntime>,
+    bridge: &Option<BridgeState>,
+) -> anyhow::Result<()> {
+    use crossterm::event::MouseEventKind;
+
+    match mouse.kind {
+        MouseEventKind::ScrollDown => {
+            let mut tab = tabs[*active_tab].clone();
+            let state = &mut tab.state;
+            let page = &mut tab.page;
+            if state.mode == BrowserMode::Scroll {
+                let find_color = find_color_for(state);
+                let line_count = render_lines(page, state.selected, &state.find_state, find_color, state.show_source).len();
+                if let Ok(size) = crossterm::terminal::size() {
+                    let viewport_height = size.1.saturating_sub(8);
+                    scroll_down(state, line_count, viewport_height);
+                }
+            }
+            tabs[*active_tab] = tab;
+        }
+        MouseEventKind::ScrollUp => {
+            let mut tab = tabs[*active_tab].clone();
+            let state = &mut tab.state;
+            if state.mode == BrowserMode::Scroll {
+                scroll_up(state);
+            }
+            tabs[*active_tab] = tab;
+        }
+        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            let row = mouse.row;
+            let col = mouse.column;
+
+            // Tab bar is at row 0
+            if row == 0 {
+                // Map column to tab index based on tab widths
+                // Each tab shown as " N:title " — scan through them
+                let mut cursor = 0u16;
+                for (i, tab) in tabs.iter().enumerate() {
+                    let label = tab.page.document.title().unwrap_or("Untitled").to_string();
+                    let tab_width = label.chars().count() as u16 + 4; // " N:title "
+                    if col >= cursor && col < cursor + tab_width {
+                        *active_tab = i;
+                        return Ok(());
+                    }
+                    cursor += tab_width;
+                }
+                return Ok(());
+            }
+
+            // Header area is rows 1-3 (tab is row 1, header border is row
+            // 2-3). Body area starts after that.
+            if row < 4 {
+                return Ok(());
+            }
+
+            // Body area: map row to rendered line + scroll_offset
+            let mut tab = tabs[*active_tab].clone();
+            let state = &mut tab.state;
+            let page = &mut tab.page;
+
+            // Row relative to body (top of body = row 4, minus 1 for top border)
+            let body_row = (row as usize)
+                .saturating_sub(4)
+                .saturating_add(state.scroll_offset as usize);
+
+            // Find the item at or near this row in the rendered lines
+            // Walk through page.items and find which one corresponds to body_row
+            let mut line_idx = 0usize;
+            let mut found_item: Option<usize> = None;
+            for block in &page.document.blocks {
+                let block_lines = block_line_count(block);
+                if body_row >= line_idx && body_row < line_idx + block_lines {
+                    // Found the block — find its item index
+                    let mut item_offset = 0usize;
+                    for b in &page.document.blocks {
+                        if std::ptr::eq(b, block) {
+                            break;
+                        }
+                        match b {
+                            Block::Link(_) | Block::Input(_) | Block::Button(_) | Block::Image(_) => item_offset += 1,
+                            _ => {}
+                        }
+                    }
+                    found_item = Some(item_offset);
+                    break;
+                }
+                line_idx += block_lines + 1; // +1 for blank line after most blocks
+            }
+
+            if let Some(item_idx) = found_item {
+                state.selected = item_idx.min(page.items.len().saturating_sub(1));
+                // Activate the selected item (link, button, input)
+                activate_selected(state, page, script_runtime, bridge)?;
+            }
+
+            tabs[*active_tab] = tab;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Count the rendered lines a Block takes up in the TUI display.
+fn block_line_count(block: &Block) -> usize {
+    match block {
+        Block::Heading { .. } => 2,       // heading line + blank
+        Block::Paragraph(text) => text.lines().count().max(1) + 1, // content + blank
+        Block::Link(_) => 1,
+        Block::Input(_) => 1,
+        Block::Button(_) => 1,
+        Block::Image(_) => 1,
+        Block::Quote(text) => text.lines().count() + 1, // lines + blank
+        Block::List(items) => items.len() + 1, // items + blank
+        Block::Rule => 2,                  // rule + blank
+        Block::Table(table) => {
+            // header + separator + rows
+            1 + 1 + table.rows.len() + 1 // + blank
+        }
+        Block::Preformatted { code, .. } => code.lines().count() + 2 + 1, // top border + lines + bottom border + blank
+        Block::Script { .. } => 0,        // not rendered
+        Block::Auth { .. } => 2,          // auth line + blank
+    }
+}
+
 /// Draw the full frame including tab bar, page content, footer, and overlays.
 fn draw_frame(
     frame: &mut ratatui::Frame<'_>,
@@ -2294,7 +2497,12 @@ fn draw_frame(
 
     // ── Body ───────────────────────────────────────────────────────
     let find_color = parse_color(&cfg.theme.find_highlight);
-    let body = Paragraph::new(render_lines(page, state.selected, &state.find_state, find_color, state.show_source))
+    let mut body_lines = render_lines(page, state.selected, &state.find_state, find_color, state.show_source);
+    // Apply text selection highlight if active
+    if state.text_select_active {
+        apply_text_selection(&mut body_lines, state.text_select_start, state.text_select_end);
+    }
+    let body = Paragraph::new(body_lines)
         .block(
             TuiBlock::default()
                 .borders(Borders::LEFT | Borders::RIGHT)
@@ -3894,6 +4102,52 @@ fn has_bg_color(style: &Style) -> bool {
     style.bg.is_some()
 }
 
+/// Apply text selection highlight to a set of rendered lines.
+/// Highlights the region between start and end with a blue background.
+fn apply_text_selection(lines: &mut [Line<'static>], start: TextSelectPos, end: TextSelectPos) {
+    let row_lo = start.row.min(end.row) as usize;
+    let row_hi = start.row.max(end.row) as usize;
+    let col_start = if start.row < end.row { start.col } else { end.col } as usize;
+    let col_end = if start.row < end.row { end.col } else { start.col } as usize;
+
+    for (row_idx, line) in lines.iter_mut().enumerate() {
+        if row_idx < row_lo || row_idx > row_hi {
+            continue;
+        }
+        if row_idx == row_lo && row_idx == row_hi {
+            // Single line selection
+            apply_col_range_highlight(line, col_start, col_end);
+        } else if row_idx == row_lo {
+            // First line: from col_start to end
+            apply_col_range_highlight(line, col_start, usize::MAX);
+        } else if row_idx == row_hi {
+            // Last line: from 0 to col_end
+            apply_col_range_highlight(line, 0, col_end);
+        } else {
+            // Middle: full line
+            apply_col_range_highlight(line, 0, usize::MAX);
+        }
+    }
+}
+
+/// Apply a blue background highlight to a range of columns within a single Line.
+fn apply_col_range_highlight(line: &mut Line<'static>, col_start: usize, col_end: usize) {
+    let mut char_offset = 0usize;
+    for span in &mut line.spans {
+        let span_len = span.content.chars().count();
+        let span_start = char_offset;
+        let span_end = char_offset + span_len;
+
+        // Check if this span overlaps the selection range
+        if span_end > col_start && span_start < col_end {
+            let style = span.style;
+            span.style = style.bg(Color::Blue).fg(Color::White);
+        }
+
+        char_offset += span_len;
+    }
+}
+
 fn render_browser_table(table: &Table) -> Vec<Line<'static>> {
     let columns = table
         .headers
@@ -4077,6 +4331,28 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::from(vec![
             Span::styled("  Home / End", Style::default().fg(Color::Yellow)),
             Span::raw("  First / Last item"),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "Text Selection",
+            Style::default().fg(Color::Cyan).bold(),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("  V", Style::default().fg(Color::Yellow)),
+            Span::raw("          Enter text selection mode"),
+        ]),
+        Line::from(vec![
+            Span::styled("  h/j/k/l", Style::default().fg(Color::Yellow)),
+            Span::raw("  Move cursor in text selection"),
+        ]),
+        Line::from(vec![
+            Span::styled("  y / Enter", Style::default().fg(Color::Yellow)),
+            Span::raw("  Copy selected text"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc / V", Style::default().fg(Color::Yellow)),
+            Span::raw("    Exit text selection"),
         ]),
         Line::raw(""),
         Line::from(Span::styled(
@@ -4494,6 +4770,47 @@ fn check_live_reload(
 }
 
 // ── Clipboard ────────────────────────────────────────────────────────
+
+/// Extract text from rendered lines between two TextSelectPos positions.
+/// start and end define a rectangular selection region: all lines between
+/// min(start.row, end.row) and max(start.row, end.row), clipped to column
+/// bounds on the first and last lines.
+fn extract_selected_text(lines: &[Line<'static>], start: TextSelectPos, end: TextSelectPos) -> String {
+    let row_lo = start.row.min(end.row) as usize;
+    let row_hi = start.row.max(end.row) as usize;
+    let col_start = if start.row < end.row { start.col } else { end.col } as usize;
+    let col_end = if start.row < end.row { end.col } else { start.col } as usize;
+
+    let mut result = String::new();
+    for row in row_lo..=row_hi {
+        if row >= lines.len() {
+            continue;
+        }
+        let line_text = lines[row].to_string();
+        let line_len = line_text.chars().count();
+        if row == row_lo && row == row_hi {
+            // Single line: slice between col_start and col_end
+            let start_idx = col_start.min(line_len);
+            let end_idx = col_end.min(line_len).max(start_idx);
+            result.push_str(&line_text.chars().skip(start_idx).take(end_idx - start_idx).collect::<String>());
+        } else if row == row_lo {
+            // First line: from col_start to end
+            let start_idx = col_start.min(line_len);
+            result.push_str(&line_text.chars().skip(start_idx).collect::<String>());
+        } else if row == row_hi {
+            // Last line: from 0 to col_end
+            let end_idx = col_end.min(line_len);
+            result.push_str(&line_text.chars().take(end_idx).collect::<String>());
+        } else {
+            // Middle lines: full content
+            result.push_str(&line_text);
+        }
+        if row < row_hi {
+            result.push('\n');
+        }
+    }
+    result
+}
 
 /// Copy text to the system clipboard. Tries wl-copy (Wayland) then xclip (X11).
 /// Returns true if the copy succeeded, false if neither tool was available.

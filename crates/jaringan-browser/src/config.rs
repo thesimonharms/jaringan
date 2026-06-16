@@ -43,6 +43,12 @@ pub struct Config {
     #[serde(default = "default_live_reload")]
     pub live_reload: bool,
 
+    /// Enable mouse support for clicking links, scrolling, and tab switching.
+    /// When true, mouse events are captured and dispatched. Keyboard controls
+    /// always work regardless of this setting.
+    #[serde(default = "default_mouse")]
+    pub enable_mouse: bool,
+
     /// Theme colours for the TUI.
     #[serde(default)]
     pub theme: ThemeConfig,
@@ -61,6 +67,7 @@ impl Default for Config {
             render_images: false,
             tab_persistence: false,
             live_reload: true,
+            enable_mouse: true,
             theme: ThemeConfig::default(),
             gateway: GatewayConfig::default(),
         }
@@ -140,6 +147,7 @@ fn default_selection() -> String { "yellow".to_owned() }
 fn default_border() -> String { "dark_gray".to_owned() }
 fn default_find_highlight() -> String { "light_yellow".to_owned() }
 fn default_live_reload() -> bool { true }
+fn default_mouse() -> bool { true }
 fn default_jrg_host() -> String { "127.0.0.1:7070".to_owned() }
 fn default_timeout() -> u64 { 30 }
 
