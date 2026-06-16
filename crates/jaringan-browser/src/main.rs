@@ -4296,6 +4296,8 @@ fn apply_col_range_highlight(line: &mut Line<'static>, col_start: usize, col_end
 }
 
 fn render_browser_table(table: &Table) -> Vec<Line<'static>> {
+    const MAX_COL_WIDTH: usize = 40;
+
     let columns = table
         .headers
         .len()
@@ -4304,38 +4306,109 @@ fn render_browser_table(table: &Table) -> Vec<Line<'static>> {
         return Vec::new();
     }
 
-    let mut widths = vec![0usize; columns];
-    for (index, cell) in table.headers.iter().enumerate() {
-        widths[index] = widths[index].max(cell.chars().count());
-    }
-    for row in &table.rows {
-        for (index, cell) in row.iter().enumerate() {
-            widths[index] = widths[index].max(cell.chars().count());
-        }
-    }
+    // Compute column widths (clamped to MAX_COL_WIDTH)
+    let widths: Vec<usize> = (0..columns)
+        .map(|col| {
+            let header_w = table.headers.get(col).map(|h| h.chars().count()).unwrap_or(0);
+            let max_row_w = table
+                .rows
+                .iter()
+                .filter_map(|row| {
+                    row.get(col).map(|cell| {
+                        cell.lines().map(|l| l.chars().count()).max().unwrap_or(0)
+                    })
+                })
+                .max()
+                .unwrap_or(0);
+            header_w.max(max_row_w).min(MAX_COL_WIDTH)
+        })
+        .collect();
 
     let mut lines = Vec::new();
-    lines.push(browser_table_row(&table.headers, &widths, true));
+
+    // ── Header row ──
+    lines.push(browser_table_row(&table.headers, &widths, true, None, false, &table.alignments));
+    // ── Header/body separator ──
     lines.push(Line::from(Span::styled(
         browser_table_separator(&widths),
         Style::default().fg(Color::DarkGray),
     )));
-    for row in &table.rows {
-        lines.push(browser_table_row(row, &widths, false));
+
+    // ── Data rows ──
+    for (row_idx, row) in table.rows.iter().enumerate() {
+        let is_even = row_idx % 2 == 0;
+        // Check if any cell in this row spans multiple lines
+        let max_lines = row
+            .iter()
+            .map(|cell| cell.lines().count().max(1))
+            .max()
+            .unwrap_or(1);
+
+        if max_lines > 1 {
+            // Multiline: render each sub-row
+            for sub_idx in 0..max_lines {
+                let sub_row: Vec<String> = (0..columns)
+                    .map(|col| {
+                        row.get(col)
+                            .map(|cell| {
+                                cell.lines().nth(sub_idx).unwrap_or("").to_string()
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                lines.push(browser_table_row(&sub_row, &widths, false, Some(row_idx), is_even, &table.alignments));
+                if sub_idx + 1 < max_lines {
+                    // Thin separator between multi-line rows
+                    lines.push(Line::from(Span::styled(
+                        browser_table_row_separator(&widths),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            }
+        } else {
+            lines.push(browser_table_row(row, &widths, false, Some(row_idx), is_even, &table.alignments));
+        }
     }
+
     lines
 }
 
-fn browser_table_row(row: &[String], widths: &[usize], header: bool) -> Line<'static> {
+fn browser_table_row(
+    row: &[String],
+    widths: &[usize],
+    header: bool,
+    _row_idx: Option<usize>,
+    is_even: bool,
+    alignments: &[jaringan_core::Alignment],
+) -> Line<'static> {
     let mut spans = vec![Span::styled("  │", Style::default().fg(Color::DarkGray))];
     for (index, width) in widths.iter().enumerate() {
         let cell = row.get(index).map(String::as_str).unwrap_or("");
-        let style = if header {
+        // Truncate cell to column width
+        let display_cell = if cell.chars().count() > *width {
+            cell.chars().take(width.saturating_sub(1)).collect::<String>() + "…"
+        } else {
+            cell.to_owned()
+        };
+
+        let base_style = if header {
             Style::default().fg(Color::Cyan).bold()
+        } else if is_even {
+            Style::default().fg(Color::White).bg(Color::Rgb(30, 30, 40))
         } else {
             Style::default().fg(Color::White)
         };
-        spans.push(Span::styled(format!(" {cell:<width$} "), style));
+
+        // Apply alignment
+        let alignment = alignments.get(index).copied().unwrap_or(jaringan_core::Alignment::None);
+        let formatted = match alignment {
+            jaringan_core::Alignment::Left => format!(" {display_cell:<width$} "),
+            jaringan_core::Alignment::Right => format!(" {display_cell:>width$} "),
+            jaringan_core::Alignment::Center => format!(" {:^width$} ", display_cell),
+            jaringan_core::Alignment::None => format!(" {display_cell:<width$} "),
+        };
+
+        spans.push(Span::styled(formatted, base_style));
         spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
     }
     Line::from(spans)
@@ -4345,6 +4418,15 @@ fn browser_table_separator(widths: &[usize]) -> String {
     let cells = widths
         .iter()
         .map(|width| "─".repeat(width + 2))
+        .collect::<Vec<_>>()
+        .join("┼");
+    format!("  ├{cells}┤")
+}
+
+fn browser_table_row_separator(widths: &[usize]) -> String {
+    let cells = widths
+        .iter()
+        .map(|width| "┄".repeat(width + 2))
         .collect::<Vec<_>>()
         .join("┼");
     format!("  ├{cells}┤")
