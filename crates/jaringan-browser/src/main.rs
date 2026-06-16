@@ -1952,6 +1952,7 @@ fn handle_key_event(
                                     state.overlay = None;
                                     navigate_to(state, loaded.location.clone());
                                     state.record_current(loaded.document.title().unwrap_or("Untitled"));
+                                    update_auth_status(state, &loaded.document);
                                     state.status = format!("Navigated to {}", url);
                                     record_goto(&mut state.goto_history, &url);
                                     *page = loaded;
@@ -2049,6 +2050,7 @@ fn handle_key_event(
                         let loaded = load_location(&location, script_runtime, bridge)?;
                         navigate_to(state, loaded.location.clone());
                         state.record_current(loaded.document.title().unwrap_or("Untitled"));
+                        update_auth_status(state, &loaded.document);
                         state.status = "Opened from history".to_string();
                         *page = loaded;
                         *file_mtime = file_mtime_of(&page.location);
@@ -2328,9 +2330,11 @@ fn handle_key_event(
             if go_back(state) {
                 match &state.current {
                     location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
-                        *page = load_location(location, script_runtime, bridge)?;
+                        let loaded = load_location(location, script_runtime, bridge)?;
+                        *page = loaded;
                         *file_mtime = file_mtime_of(&page.location);
                         state.record_current(page.document.title().unwrap_or("Untitled"));
+                        update_auth_status(state, &page.document);
                     }
                     PageLocation::Unsupported(_) => {}
                 }
@@ -2340,18 +2344,22 @@ fn handle_key_event(
             if go_forward(state) {
                 match &state.current {
                     location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
-                        *page = load_location(location, script_runtime, bridge)?;
+                        let loaded = load_location(location, script_runtime, bridge)?;
+                        *page = loaded;
                         *file_mtime = file_mtime_of(&page.location);
                         state.record_current(page.document.title().unwrap_or("Untitled"));
+                        update_auth_status(state, &page.document);
                     }
                     PageLocation::Unsupported(_) => {}
                 }
             }
         }
         KeyCode::Char('r') => {
-            *page = load_location(&page.location, script_runtime, bridge)?;
+            let loaded = load_location(&page.location, script_runtime, bridge)?;
+            *page = loaded;
             *file_mtime = file_mtime_of(&page.location);
             state.status = String::from("Reloaded");
+            update_auth_status(state, &page.document);
         }
         KeyCode::Char('n') if ctrl && state.overlay == Some(jaringan_browser::Overlay::Find) => {
             // Next match in find mode
@@ -2674,6 +2682,25 @@ fn draw_frame(
                     Style::default().fg(Color::Black).bg(mode_color).bold(),
                 ),
                 Span::raw(" "),
+                {
+                    // Auth indicator
+                    let auth_span: Span<'static> = if let Some(ref svc) = state.auth_service_name {
+                        if state.has_auth_token {
+                            Span::styled(
+                                format!(" 🔒{svc} "),
+                                Style::default().fg(Color::Green),
+                            )
+                        } else {
+                            Span::styled(
+                                format!(" 🔓{svc} "),
+                                Style::default().fg(Color::Red),
+                            )
+                        }
+                    } else {
+                        Span::raw("")
+                    };
+                    auth_span
+                },
                 Span::styled(&state.status, Style::default().fg(Color::Yellow)),
                 Span::raw(" · "),
                 Span::styled(format!("{pct}%"), Style::default().fg(Color::DarkGray)),
@@ -4995,6 +5022,31 @@ fn check_live_reload(
         *page = reloaded;
         state.record_current(page.document.title().unwrap_or("Untitled"));
         state.status = String::from("⚡ Reloaded (file changed)");
+    }
+}
+
+// ── Auth status ─────────────────────────────────────────────────────
+
+/// Scan a document for Auth blocks, look up stored tokens, and update
+/// the BrowserState fields accordingly.
+fn update_auth_status(state: &mut BrowserState, doc: &Document) {
+    let auth_block = doc.blocks.iter().find_map(|b| {
+        if let Block::Auth { service, .. } = b {
+            Some(service.clone())
+        } else {
+            None
+        }
+    });
+    match auth_block {
+        Some(service) => {
+            let has_token = lookup_stored_token(&service).is_some();
+            state.has_auth_token = has_token;
+            state.auth_service_name = Some(service);
+        }
+        None => {
+            state.has_auth_token = false;
+            state.auth_service_name = None;
+        }
     }
 }
 

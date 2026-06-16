@@ -251,6 +251,8 @@ pub struct BrowserState {
     pub text_select_active: bool,
     pub text_select_start: TextSelectPos,
     pub text_select_end: TextSelectPos,
+    pub has_auth_token: bool,
+    pub auth_service_name: Option<String>,
 }
 
 impl BrowserState {
@@ -284,6 +286,8 @@ impl BrowserState {
             text_select_active: false,
             text_select_start: TextSelectPos { row: 0, col: 0 },
             text_select_end: TextSelectPos { row: 0, col: 0 },
+            has_auth_token: false,
+            auth_service_name: None,
         }
     }
 
