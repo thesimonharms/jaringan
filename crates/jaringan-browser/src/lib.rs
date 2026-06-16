@@ -136,6 +136,41 @@ pub fn remove_bookmark(entries: &mut Vec<Bookmark>, url: &str) {
 
 // ── Location ─────────────────────────────────────────────────────────
 
+/// Path to the goto history file.
+pub fn goto_history_path() -> PathBuf {
+    ensure_data_dir().join("goto_history.json")
+}
+
+/// Save goto history to disk.
+pub fn save_goto_history(entries: &[String]) {
+    if let Ok(json) = serde_json::to_string(entries)
+        && let Err(e) = fs::write(goto_history_path(), json) {
+            eprintln!("[jaringan] warning: failed to save goto history: {e}");
+        }
+}
+
+/// Load goto history from disk.
+pub fn load_goto_history() -> Vec<String> {
+    let path = goto_history_path();
+    if !path.exists() {
+        return Vec::new();
+    }
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Record a goto URL, dedup by position (newest first), cap at 50.
+pub fn record_goto(entries: &mut Vec<String>, url: &str) {
+    entries.retain(|e| e != url);
+    entries.push(url.to_owned());
+    if entries.len() > 50 {
+        entries.drain(..entries.len() - 50);
+    }
+    save_goto_history(entries);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PageLocation {
     File(PathBuf),
@@ -210,6 +245,8 @@ pub struct BrowserState {
     pub find_state: FindState,
     pub config: Config,
     pub goto_buffer: String,
+    pub goto_history: Vec<String>,
+    pub goto_history_idx: Option<usize>,
     pub show_source: bool,
     pub text_select_active: bool,
     pub text_select_start: TextSelectPos,
@@ -220,6 +257,7 @@ impl BrowserState {
     pub fn new(current: PageLocation, config: Config) -> Self {
         let history = load_history();
         let bookmarks = load_bookmarks();
+        let goto_history = load_goto_history();
         Self {
             current,
             mode: BrowserMode::Selection,
@@ -240,6 +278,8 @@ impl BrowserState {
             },
             config,
             goto_buffer: String::new(),
+            goto_history,
+            goto_history_idx: None,
             show_source: false,
             text_select_active: false,
             text_select_start: TextSelectPos { row: 0, col: 0 },

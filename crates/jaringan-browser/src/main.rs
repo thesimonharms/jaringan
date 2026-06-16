@@ -20,7 +20,7 @@ use crossterm::event::{EnableMouseCapture, DisableMouseCapture};
 use jaringan_browser::{
     ActionConfirmation, BrowserMode, BrowserState, FindState, PageLocation, SavedTab, TextSelectPos,
     cache_filename_for_url, config::parse_color, go_back, go_forward, load_tabs, navigate_to,
-    resolve_target, save_tabs, scroll_down, scroll_page_down, scroll_page_up, scroll_to_bottom,
+    record_goto, resolve_target, save_tabs, scroll_down, scroll_page_down, scroll_page_up, scroll_to_bottom,
     scroll_up, selection_down, selection_first, selection_last, selection_up,
     switch_mode, toggle_mode, toggle_overlay, web_to_jrg_url,
 };
@@ -1937,6 +1937,7 @@ fn handle_key_event(
                 KeyCode::Esc => {
                     state.overlay = None;
                     state.goto_buffer.clear();
+                    state.goto_history_idx = None;
                     state.status = String::from("Cancelled");
                 }
                 KeyCode::Enter => {
@@ -1952,6 +1953,7 @@ fn handle_key_event(
                                     navigate_to(state, loaded.location.clone());
                                     state.record_current(loaded.document.title().unwrap_or("Untitled"));
                                     state.status = format!("Navigated to {}", url);
+                                    record_goto(&mut state.goto_history, &url);
                                     *page = loaded;
                                     *file_mtime = file_mtime_of(&page.location);
                                 }
@@ -1964,6 +1966,38 @@ fn handle_key_event(
                         }
                     }
                     state.goto_buffer.clear();
+                    state.goto_history_idx = None;
+                }
+                KeyCode::Up | KeyCode::Char('k') if !state.goto_history.is_empty() => {
+                    // Cycle backward through goto history
+                    let idx = match state.goto_history_idx {
+                        Some(i) if i > 0 => i - 1,
+                        Some(_) | None => state.goto_history.len() - 1,
+                    };
+                    state.goto_history_idx = Some(idx);
+                    state.goto_buffer = state.goto_history[idx].clone();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    // Cycle forward through goto history
+                    match state.goto_history_idx {
+                        Some(i) if i + 1 < state.goto_history.len() => {
+                            let idx = i + 1;
+                            state.goto_history_idx = Some(idx);
+                            state.goto_buffer = state.goto_history[idx].clone();
+                        }
+                        Some(_) => {
+                            // Past the end: show empty
+                            state.goto_history_idx = None;
+                            state.goto_buffer.clear();
+                        }
+                        None if !state.goto_history.is_empty() => {
+                            // Start at newest (last entry)
+                            let idx = state.goto_history.len() - 1;
+                            state.goto_history_idx = Some(idx);
+                            state.goto_buffer = state.goto_history[idx].clone();
+                        }
+                        _ => {}
+                    }
                 }
                 KeyCode::Backspace => {
                     state.goto_buffer.pop();
@@ -3849,8 +3883,52 @@ fn draw_goto_overlay(frame: &mut ratatui::Frame<'_>, state: &BrowserState) {
         )
         .wrap(Wrap { trim: false });
 
+    let completions = if !state.goto_buffer.is_empty() {
+        let q = state.goto_buffer.to_lowercase();
+        let mut matches: Vec<&str> = state.history.iter()
+            .rev()
+            .filter(|e| e.url.to_lowercase().contains(&q) || e.title.to_lowercase().contains(&q))
+            .take(5)
+            .map(|e| e.url.as_str())
+            .collect();
+        // Also include goto_history
+        for entry in state.goto_history.iter().rev() {
+            if entry.to_lowercase().contains(&q) && !matches.contains(&entry.as_str()) && matches.len() < 5 {
+                matches.push(entry.as_str());
+            }
+        }
+        matches
+    } else {
+        Vec::new()
+    };
+
     frame.render_widget(Clear, overlay_area[1]);
     frame.render_widget(block, overlay_area[1]);
+
+    // Draw completion dropdown below the Goto input
+    if !completions.is_empty() {
+        let completion_text = completions
+            .iter()
+            .enumerate()
+            .map(|(i, url)| format!("  {}. {url}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let completion_block = Paragraph::new(completion_text)
+            .block(
+                TuiBlock::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            )
+            .wrap(Wrap { trim: false });
+
+        let completion_area = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(completions.len() as u16 + 2)])
+            .split(overlay_area[1]);
+
+        frame.render_widget(completion_block, completion_area[1]);
+    }
 }
 
 /// Scan rendered line text for a query and return the line indices that match.
