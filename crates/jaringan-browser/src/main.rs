@@ -18,7 +18,7 @@ use crossterm::{
 };
 use crossterm::event::{EnableMouseCapture, DisableMouseCapture};
 use jaringan_browser::{
-    ActionConfirmation, BrowserMode, BrowserState, FindState, PageLocation, SavedTab, TextSelectPos,
+    ActionConfirmation, BrowserMode, BrowserState, DownloadPrompt, FindState, PageLocation, SavedTab, TextSelectPos,
     cache_filename_for_url, config::parse_color, go_back, go_forward, load_tabs, navigate_to,
     record_goto, resolve_target, save_tabs, scroll_down, scroll_page_down, scroll_page_up, scroll_to_bottom,
     scroll_up, selection_down, selection_first, selection_last, selection_up,
@@ -2400,6 +2400,18 @@ fn handle_key_event(
                 state.status = format!("Reloaded {count} plugin(s)");
             }
         }
+        // Download prompt: y/n
+        KeyCode::Char('y') if state.pending_download.is_some() => {
+            if let Some(ref dl) = state.pending_download.clone() {
+                let result = perform_download(dl);
+                state.status = result;
+                state.pending_download = None;
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') if state.pending_download.is_some() => {
+            state.pending_download = None;
+            state.status = String::from("Download cancelled");
+        }
         _ => {}
     }
 
@@ -2791,6 +2803,18 @@ fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage, script_run
             location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
                 state.status = format!("⠋ Loading {}", location.display_url());
                 let loaded = load_location(&location, script_runtime, bridge)?;
+                if !is_renderable_content_type(&loaded.content_type) {
+                    // Non-renderable content — offer to download
+                    let url = location.display_url();
+                    let filename = filename_from_url(&url);
+                    state.pending_download = Some(DownloadPrompt {
+                        url,
+                        filename,
+                        content_type: loaded.content_type.clone(),
+                    });
+                    state.status = format!("Download {}? (y/N)", state.pending_download.as_ref().unwrap().filename);
+                    return Ok(());
+                }
                 navigate_to(state, loaded.location.clone());
                 state.record_current(loaded.document.title().unwrap_or("Untitled"));
                 state.status = format!("Opened {label}");
@@ -5026,6 +5050,94 @@ fn check_live_reload(
 }
 
 // ── Auth status ─────────────────────────────────────────────────────
+
+/// Determine if a content type is renderable in the browser.
+fn is_renderable_content_type(ct: &str) -> bool {
+    ct.contains("jrg")
+        || ct.contains("text/plain")
+        || ct.contains("text/html")
+        || ct.contains("json")
+        || ct.starts_with("dir")
+        || ct.is_empty()
+}
+
+/// Suggest a filename from a URL path.
+fn filename_from_url(url: &str) -> String {
+    let path = url.split('?').next().unwrap_or(url);
+    let name = path.split('/').last().unwrap_or("download");
+    if name.is_empty() || name == "." || name == ".." {
+        "download".to_owned()
+    } else {
+        name.to_owned()
+    }
+}
+
+/// Download a file to ~/Downloads/ and return a status message.
+fn perform_download(dl: &DownloadPrompt) -> String {
+    let downloads_dir = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("Downloads");
+    if let Err(e) = fs::create_dir_all(&downloads_dir) {
+        return format!("Failed to create Downloads dir: {e}");
+    }
+
+    let dest = downloads_dir.join(&dl.filename);
+    // Avoid overwriting — append a number if the file exists
+    let dest = if dest.exists() {
+        let stem = dest.file_stem().unwrap_or_default().to_string_lossy();
+        let ext = dest.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+        let base = downloads_dir.join(format!("{stem}"));
+        let mut counter = 1;
+        loop {
+            let candidate = base.with_file_name(format!("{stem} ({counter}){ext}"));
+            if !candidate.exists() {
+                break candidate;
+            }
+            counter += 1;
+        }
+    } else {
+        dest
+    };
+
+    // Try fetching the URL as text and writing it
+    // First try JRG TCP for jrg:// URLs
+    if dl.url.starts_with("jrg://") {
+        match JaringanUrl::parse(&dl.url) {
+            Ok(url) => match fetch_tcp(&url) {
+                Ok(resp) => {
+                    if let Err(e) = fs::write(&dest, &resp.body) {
+                        return format!("Failed to write {dest:?}: {e}");
+                    }
+                    let size = resp.body.len();
+                    format!("Downloaded {size}B → {}", dest.display())
+                }
+                Err(e) => {
+                    format!("Download failed: {e}")
+                }
+            },
+            Err(e) => format!("Bad URL: {e}"),
+        }
+    } else if dl.url.starts_with("http://") || dl.url.starts_with("https://") {
+        // Web URL: use reqwest
+        match reqwest::blocking::get(&dl.url) {
+            Ok(resp) => {
+                match resp.bytes() {
+                    Ok(bytes) => {
+                        if let Err(e) = fs::write(&dest, &bytes) {
+                            return format!("Failed to write {dest:?}: {e}");
+                        }
+                        format!("Downloaded {}B → {}", bytes.len(), dest.display())
+                    }
+                    Err(e) => format!("Download failed: {e}"),
+                }
+            }
+            Err(e) => format!("Download failed: {e}"),
+        }
+    } else {
+        format!("Cannot download from: {}", dl.url)
+    }
+}
 
 /// Scan a document for Auth blocks, look up stored tokens, and update
 /// the BrowserState fields accordingly.

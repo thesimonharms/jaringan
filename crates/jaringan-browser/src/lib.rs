@@ -221,6 +221,14 @@ pub struct ActionConfirmation {
     pub target: String,
 }
 
+/// A pending file download prompt shown in the status bar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadPrompt {
+    pub url: String,
+    pub filename: String,
+    pub content_type: String,
+}
+
 /// Position in rendered text for text selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextSelectPos {
@@ -238,6 +246,7 @@ pub struct BrowserState {
     pub forward_stack: Vec<PageLocation>,
     pub status: String,
     pub pending_confirmation: Option<ActionConfirmation>,
+    pub pending_download: Option<DownloadPrompt>,
     pub overlay: Option<Overlay>,
     pub overlay_selected: usize,
     pub history: Vec<HistoryEntry>,
@@ -269,6 +278,7 @@ impl BrowserState {
             forward_stack: Vec::new(),
             status: String::from("Ready"),
             pending_confirmation: None,
+            pending_download: None,
             overlay: None,
             overlay_selected: 0,
             history,
