@@ -1849,6 +1849,7 @@ fn handle_key_event(
 ) -> anyhow::Result<()> {
     let ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
+    let shift = key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
 
     // ── Tab management keybindings (no borrows of current tab needed) ──
     match key.code {
@@ -1892,6 +1893,17 @@ fn handle_key_event(
             } else {
                 *active_tab - 1
             };
+            return Ok(());
+        }
+        // Ctrl+Shift+Left/Right: reorder tabs
+        KeyCode::Left if ctrl && shift && *active_tab > 0 => {
+            tabs.swap(*active_tab, *active_tab - 1);
+            *active_tab -= 1;
+            return Ok(());
+        }
+        KeyCode::Right if ctrl && shift && *active_tab + 1 < tabs.len() => {
+            tabs.swap(*active_tab, *active_tab + 1);
+            *active_tab += 1;
             return Ok(());
         }
         _ => {}
@@ -2216,6 +2228,63 @@ fn handle_key_event(
         }
         KeyCode::Char('l') if ctrl => {
             terminal.clear()?;
+        }
+        KeyCode::Enter if ctrl => {
+            // Ctrl+Enter: open link/button in a new background tab
+            let Some(item) = page.items.get(state.selected).cloned() else {
+                state.status = String::from("No selectable item");
+                tabs[*active_tab] = tab;
+                return Ok(());
+            };
+            match item {
+                InteractiveItem::Link { label, target } => {
+                    let location = resolve_target(&page.location, &target);
+                    if matches!(location, PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) {
+                        match load_location(&location, script_runtime, bridge) {
+                            Ok(loaded) => {
+                                let mut s = BrowserState::new(loaded.location.clone(), state.config.clone());
+                                s.record_current(loaded.document.title().unwrap_or("Untitled"));
+                                tabs.push(Tab {
+                                    page: loaded,
+                                    state: s,
+                                    file_mtime: file_mtime_of(&location),
+                                });
+                                state.status = format!("Opened {label} in new tab (#{})", tabs.len());
+                            }
+                            Err(e) => {
+                                state.status = format!("Failed to load {target}: {e}");
+                            }
+                        }
+                    } else {
+                        state.status = format!("Unsupported target: {target}");
+                    }
+                }
+                InteractiveItem::Button(action) => {
+                    let mut fresh_page = page.clone();
+                    let loc = fresh_page.location.clone();
+                    match load_location(&loc, script_runtime, bridge) {
+                        Ok(loaded) => {
+                            let new_loc = loaded.location.clone();
+                            let mut s = BrowserState::new(new_loc.clone(), state.config.clone());
+                            s.record_current(loaded.document.title().unwrap_or("Untitled"));
+                            tabs.push(Tab {
+                                page: loaded,
+                                state: s,
+                                file_mtime: file_mtime_of(&new_loc),
+                            });
+                            state.status = format!("Opened in new tab (#{})", tabs.len());
+                        }
+                        Err(e) => {
+                            state.status = format!("Failed to open in new tab: {e}");
+                        }
+                    }
+                }
+                _ => {
+                    state.status = String::from("This item cannot be opened in a new tab");
+                }
+            }
+            tabs[*active_tab] = tab;
+            return Ok(());
         }
         KeyCode::Enter => {
             activate_selected(state, page, script_runtime, bridge)?;
