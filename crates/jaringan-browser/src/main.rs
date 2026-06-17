@@ -21,7 +21,7 @@ use jaringan_browser::{
     ActionConfirmation, BrowserMode, BrowserState, DownloadPrompt, FindState, PageLocation, SavedTab, TextSelectPos,
     cache_filename_for_url, config::parse_color, go_back, go_forward, load_tabs, navigate_to,
     record_goto, resolve_target, save_tabs, scroll_down, scroll_page_down, scroll_page_up, scroll_to_bottom,
-    scroll_up, selection_down, selection_first, selection_last, selection_up,
+    scroll_to_top, scroll_up, selection_down, selection_first, selection_last, selection_up,
     switch_mode, toggle_mode, toggle_overlay, web_to_jrg_url,
 };
 use jaringan_core::{
@@ -1828,7 +1828,7 @@ fn run_app(
             Event::Key(key) => {
                 handle_key_event(&mut tabs, &mut active_tab, terminal, key, &script_runtime, &bridge, &mut plugin_registry)?;
             }
-            Event::Mouse(mouse) => {
+            Event::Mouse(mouse) if cfg.enable_mouse => {
                 handle_mouse_event(&mut tabs, &mut active_tab, mouse, &script_runtime, &bridge)?;
             }
             Event::Resize(_, _) => {}
@@ -2250,8 +2250,20 @@ fn handle_key_event(
                 }
             }
         },
-        KeyCode::Home => selection_first(state),
-        KeyCode::End => selection_last(state, page.items.len()),
+        KeyCode::Home => match state.mode {
+            BrowserMode::Selection => selection_first(state),
+            BrowserMode::Scroll => scroll_to_top(state),
+        },
+        KeyCode::End => match state.mode {
+            BrowserMode::Selection => selection_last(state, page.items.len()),
+            BrowserMode::Scroll => {
+                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source).len();
+                if let Ok(size) = terminal.size() {
+                    let viewport_height = size.height.saturating_sub(8);
+                    scroll_to_bottom(state, line_count, viewport_height);
+                }
+            }
+        },
         KeyCode::Char('g') if !ctrl => {
             state.overlay = Some(jaringan_browser::Overlay::GoTo);
             state.goto_buffer.clear();
@@ -2484,12 +2496,29 @@ fn handle_mouse_event(
 
             // Tab bar is at row 0
             if row == 0 {
-                // Map column to tab index based on tab widths
-                // Each tab shown as " N:title " — scan through them
+                // Map column to tab index based on tab widths.
+                // Must match draw_tab_bar's format: "{prefix}{label}{prefix}"
+                // where label = " {display_title}{watch_mark} " and prefix is "▸"/" ".
                 let mut cursor = 0u16;
                 for (i, tab) in tabs.iter().enumerate() {
-                    let label = tab.page.document.title().unwrap_or("Untitled").to_string();
-                    let tab_width = label.chars().count() as u16 + 4; // " N:title "
+                    let title = tab.page.document.title().unwrap_or("Untitled");
+                    let is_watching = tab.state.config.live_reload
+                        && matches!(&tab.page.location, PageLocation::File(p) if p.is_file() || p.is_dir());
+                    let watch_mark_len: u16 = if is_watching { 2 } else { 0 }; // " ◉"
+                    let is_welcome = tab.page.location == PageLocation::File(PathBuf::from("welcome"));
+                    // Display title length must match draw_tab_bar exactly
+                    let display_title_len: u16 = if is_welcome {
+                        7 // "Welcome"
+                    } else if title.len() > 20 {
+                        // Truncated: floor_char_boundary(18) chars + "…"
+                        let trunc_len = title.floor_char_boundary(18);
+                        title[..trunc_len].chars().count() as u16 + 1
+                    } else {
+                        title.chars().count() as u16
+                    };
+                    // label = " {display}{watch_mark} " (1 + display + watch + 1)
+                    // full  = prefix(1) + label + prefix(1) = display + watch + 4
+                    let tab_width = display_title_len + watch_mark_len + 4;
                     if col >= cursor && col < cursor + tab_width {
                         *active_tab = i;
                         return Ok(());
@@ -2530,6 +2559,13 @@ fn handle_mouse_event(
                         }
                         match b {
                             Block::Link(_) | Block::Input(_) | Block::Button(_) | Block::Image(_) => item_offset += 1,
+                            Block::Paragraph(text) => {
+                                // Inline links inside paragraphs are also selectable items
+                                item_offset += split_inline_spans(text)
+                                    .iter()
+                                    .filter(|s| matches!(s, InlineSpan::Link { .. }))
+                                    .count();
+                            }
                             _ => {}
                         }
                     }
@@ -2544,6 +2580,8 @@ fn handle_mouse_event(
                 // Activate the selected item (link, button, input)
                 activate_selected(state, page, script_runtime, bridge)?;
             }
+            // Update file mtime after potential navigation (mirrors Enter handler)
+            tab.file_mtime = file_mtime_of(&tab.page.location);
 
             tabs[*active_tab] = tab;
         }
