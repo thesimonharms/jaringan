@@ -355,13 +355,31 @@ pub fn save(config: &Config) -> Result<(), String> {
 /// Ensure the default config file exists. Returns the loaded/default config.
 /// Call at browser startup.
 pub fn ensure_defaults() -> Config {
-    let cfg = load().ok().flatten().unwrap_or_default();
     let path = config_path();
-    if !path.exists() {
-        eprintln!("[jaringan] writing default config to {}", path.display());
-        let _ = save(&cfg);
+
+    match load() {
+        Ok(Some(cfg)) => {
+            // Config loaded successfully
+            return cfg;
+        }
+        Ok(None) => {
+            // No config exists at either path — write defaults
+            eprintln!("[jaringan] writing default config to {}", path.display());
+            let cfg = Config::default();
+            let _ = save(&cfg);
+            return cfg;
+        }
+        Err(e) => {
+            // Config exists but is corrupt or unreadable
+            eprintln!("[jaringan] WARNING: {e}");
+            eprintln!(
+                "[jaringan] using default settings; fix or delete {} to suppress this warning",
+                path.display()
+            );
+        }
     }
-    cfg
+
+    Config::default()
 }
 
 // ── Colour helpers ─────────────────────────────────────────────────
