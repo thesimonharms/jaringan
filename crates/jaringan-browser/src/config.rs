@@ -127,6 +127,12 @@ pub struct Keybindings {
     #[serde(default = "default_kb_text_selection")] pub text_selection: String,
     #[serde(default = "default_kb_text_select_exit")] pub text_select_exit: String,
     #[serde(default = "default_kb_plugin_reload")] pub plugin_reload: String,
+    #[serde(default = "default_kb_chord_leader")] pub chord_leader: String,
+    #[serde(default = "default_kb_chord_ai_summarize")] pub chord_ai_summarize: String,
+    #[serde(default = "default_kb_chord_ai_ask")] pub chord_ai_ask: String,
+    #[serde(default = "default_kb_chord_ai_find")] pub chord_ai_find: String,
+    #[serde(default = "default_kb_chord_ai_tag_bookmark")] pub chord_ai_tag_bookmark: String,
+    #[serde(default = "default_kb_chord_ai_tab_suggest")] pub chord_ai_tab_suggest: String,
 }
 
 impl Default for Keybindings {
@@ -165,6 +171,49 @@ impl Default for Keybindings {
             text_selection: default_kb_text_selection(),
             text_select_exit: default_kb_text_select_exit(),
             plugin_reload: default_kb_plugin_reload(),
+            chord_leader: default_kb_chord_leader(),
+            chord_ai_summarize: default_kb_chord_ai_summarize(),
+            chord_ai_ask: default_kb_chord_ai_ask(),
+            chord_ai_find: default_kb_chord_ai_find(),
+            chord_ai_tag_bookmark: default_kb_chord_ai_tag_bookmark(),
+            chord_ai_tab_suggest: default_kb_chord_ai_tab_suggest(),
+        }
+    }
+}
+
+/// AI provider configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiConfig {
+    /// Which baochuan provider to use: "openai", "anthropic", "deepseek",
+    /// "openrouter", "gemini", "grok", "mistral", etc.
+    #[serde(default = "default_ai_provider")]
+    pub provider: String,
+    /// Model name to use (e.g. "gpt-4o-mini", "claude-3-haiku")
+    #[serde(default = "default_ai_model")]
+    pub model: String,
+    /// Environment variable name that holds the API key (e.g. "OPENAI_API_KEY")
+    #[serde(default = "default_ai_api_key_env")]
+    pub api_key_env: String,
+    /// Timeout in seconds for AI requests.
+    #[serde(default = "default_ai_timeout")]
+    pub timeout_secs: u64,
+    /// Custom system prompt for page summarisation.
+    #[serde(default = "default_ai_summary_prompt")]
+    pub summary_prompt: String,
+    /// Custom system prompt for ask-about-page queries.
+    #[serde(default = "default_ai_ask_prompt")]
+    pub ask_prompt: String,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_ai_provider(),
+            model: default_ai_model(),
+            api_key_env: default_ai_api_key_env(),
+            timeout_secs: default_ai_timeout(),
+            summary_prompt: default_ai_summary_prompt(),
+            ask_prompt: default_ai_ask_prompt(),
         }
     }
 }
@@ -182,6 +231,7 @@ pub struct Config {
     #[serde(default)] pub theme: ThemeConfig,
     #[serde(default)] pub gateway: GatewayConfig,
     #[serde(default)] pub keybindings: Keybindings,
+    #[serde(default)] pub ai: AiConfig,
 }
 
 impl Default for Config {
@@ -194,6 +244,7 @@ impl Default for Config {
             theme: ThemeConfig::default(),
             gateway: GatewayConfig::default(),
             keybindings: Keybindings::default(),
+            ai: AiConfig::default(),
         }
     }
 }
@@ -292,6 +343,22 @@ fn default_kb_source_view() -> String { default_kb("Ctrl+\\") }
 fn default_kb_text_selection() -> String { default_kb("V") }
 fn default_kb_text_select_exit() -> String { default_kb("Esc") }
 fn default_kb_plugin_reload() -> String { default_kb("Ctrl+Shift+R") }
+fn default_ai_provider() -> String { "openai".to_owned() }
+fn default_ai_model() -> String { "gpt-4o-mini".to_owned() }
+fn default_ai_api_key_env() -> String { "OPENAI_API_KEY".to_owned() }
+fn default_ai_timeout() -> u64 { 30 }
+fn default_ai_summary_prompt() -> String {
+    "Summarise this page in 3-5 concise bullet points. Focus on the key facts and main arguments.".to_owned()
+}
+fn default_ai_ask_prompt() -> String {
+    "You are a helpful assistant. Answer the user's question based on the page content provided.".to_owned()
+}
+fn default_kb_chord_leader() -> String { default_kb("A") }
+fn default_kb_chord_ai_summarize() -> String { default_kb("s") }
+fn default_kb_chord_ai_ask() -> String { default_kb("a") }
+fn default_kb_chord_ai_find() -> String { default_kb("f") }
+fn default_kb_chord_ai_tag_bookmark() -> String { default_kb("t") }
+fn default_kb_chord_ai_tab_suggest() -> String { default_kb("T") }
 
 // ── Paths ──────────────────────────────────────────────────────────
 

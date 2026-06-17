@@ -19,7 +19,7 @@ use crossterm::{
 use crossterm::event::{EnableMouseCapture, DisableMouseCapture};
 use jaringan_browser::config::key_matches_binding;
 use jaringan_browser::{
-    ActionConfirmation, BrowserMode, BrowserState, DownloadPrompt, FindState, PageLocation, SavedTab, TextSelectPos,
+    ActionConfirmation, BrowserMode, BrowserState, ChordMode, DownloadPrompt, FindState, PageLocation, SavedTab, TextSelectPos,
     cache_filename_for_url, config::parse_color, go_back, go_forward, load_tabs, navigate_to,
     record_goto, resolve_target, save_tabs, scroll_down, scroll_page_down, scroll_page_up, scroll_to_bottom,
     scroll_to_top, scroll_up, selection_down, selection_first, selection_last, selection_up,
@@ -1777,6 +1777,16 @@ fn run_app(
                 }
     }
 
+    // ── AI client setup ──
+    let ai_client = jaringan_browser::ai::AiClient::from_config(&cfg.ai);
+    if ai_client.is_some() {
+        for tab in &mut tabs {
+            tab.state.ai_available = true;
+        }
+    }
+    let _ai_runtime = tokio::runtime::Runtime::new()?;
+    let (ai_tx, ai_rx) = std::sync::mpsc::channel::<(usize, String)>();
+
     let mut active_tab: usize = 0;
     let started = Instant::now();
 
@@ -1818,6 +1828,63 @@ fn run_app(
         // Write the tab back, releasing the clone
         tabs[active_tab] = tab;
 
+        // ── Handle AI results from background thread ──
+        if let Ok((tab_idx, result)) = ai_rx.try_recv() {
+            if tab_idx < tabs.len() {
+                tabs[tab_idx].state.ai_response = Some(result);
+                tabs[tab_idx].state.ai_request = None;
+            }
+        }
+
+        // ── Spawn AI request if one is pending ──
+        let pending = tabs[active_tab].state.ai_request.take();
+        if let Some(action) = pending {
+            tabs[active_tab].state.ai_request = None;
+            let tab_idx = active_tab;
+            let page_text = BrowserState::page_text(&tabs[tab_idx].page.document);
+            let question = tabs[tab_idx].state.ai_question_buffer.clone();
+            tabs[tab_idx].state.ai_question_buffer.clear();
+
+            // For tab_suggest, collect all tabs' page texts
+            let all_tab_texts: Vec<String> = if action == "tab_suggest" {
+                tabs.iter().map(|t| BrowserState::page_text(&t.page.document)).collect()
+            } else {
+                Vec::new()
+            };
+
+            if let Some(ref client) = ai_client {
+                let client = client.clone();
+                let tx = ai_tx.clone();
+                tabs[tab_idx].state.status = format!("AI: {}...", action);
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let result = rt.block_on(async {
+                        match action.as_str() {
+                            "summarize" => client.summarize(&page_text).await,
+                            "ask" => client.ask(&page_text, &question).await,
+                            "find" => {
+                                let passages = client.semantic_find(&page_text, &question).await?;
+                                Ok(passages.join("\n"))
+                            }
+                            "tag_bookmark" => client.suggest_tags(&page_text).await,
+                            "tab_suggest" => {
+                                let refs: Vec<&str> = all_tab_texts.iter().map(|s| s.as_str()).collect();
+                                client.tab_suggestions(&refs).await
+                            }
+                            _ => Err("Unknown AI action".to_string()),
+                        }
+                    });
+                    let display = match &result {
+                        Ok(text) => format!("AI: {text}"),
+                        Err(e) => format!("AI error: {e}"),
+                    };
+                    let _ = tx.send((tab_idx, display));
+                });
+            } else {
+                tabs[tab_idx].state.status = "AI disabled: no API key configured".to_string();
+            }
+        }
+
         // Poll for keyboard events — handle_key_event borrows tabs mutably
         if !event::poll(Duration::from_millis(120))? {
             continue;
@@ -1849,6 +1916,54 @@ fn handle_key_event(
     let ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
     let shift = key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
+
+    // ── Chord mode handling ──
+    let chord_leader = &tabs[*active_tab].state.config.keybindings.chord_leader;
+    let is_leader = !chord_leader.is_empty() && key_matches_binding(&key, chord_leader);
+
+    if tabs[*active_tab].state.chord_mode != ChordMode::None {
+        // We're waiting for the second key in a chord
+        let action = match key.code {
+            KeyCode::Char(c) => c,
+            _ => {
+                tabs[*active_tab].state.chord_mode = ChordMode::None;
+                tabs[*active_tab].state.status = String::from("Chord cancelled");
+                return Ok(());
+            }
+        };
+
+        let cfg = &tabs[*active_tab].state.config.keybindings;
+        if !cfg.chord_ai_summarize.is_empty() && action == cfg.chord_ai_summarize.chars().next().unwrap_or('?') {
+            tabs[*active_tab].state.ai_request = Some("summarize".to_owned());
+            tabs[*active_tab].state.chord_mode = ChordMode::None;
+        } else if !cfg.chord_ai_ask.is_empty() && action == cfg.chord_ai_ask.chars().next().unwrap_or('?') {
+            tabs[*active_tab].state.overlay = Some(jaringan_browser::Overlay::AiAsk);
+            tabs[*active_tab].state.ai_question_buffer.clear();
+            tabs[*active_tab].state.chord_mode = ChordMode::None;
+            tabs[*active_tab].state.status = "Ask about page: type your question and press Enter".to_owned();
+        } else if !cfg.chord_ai_find.is_empty() && action == cfg.chord_ai_find.chars().next().unwrap_or('?') {
+            tabs[*active_tab].state.overlay = Some(jaringan_browser::Overlay::AiFind);
+            tabs[*active_tab].state.ai_question_buffer.clear();
+            tabs[*active_tab].state.chord_mode = ChordMode::None;
+            tabs[*active_tab].state.status = "Semantic find: type your query and press Enter".to_owned();
+        } else if !cfg.chord_ai_tag_bookmark.is_empty() && action == cfg.chord_ai_tag_bookmark.chars().next().unwrap_or('?') {
+            tabs[*active_tab].state.chord_mode = ChordMode::None;
+            tabs[*active_tab].state.ai_request = Some("tag_bookmark".to_owned());
+        } else if !cfg.chord_ai_tab_suggest.is_empty() && action == cfg.chord_ai_tab_suggest.chars().next().unwrap_or('?') {
+            tabs[*active_tab].state.chord_mode = ChordMode::None;
+            tabs[*active_tab].state.ai_request = Some("tab_suggest".to_owned());
+        } else {
+            tabs[*active_tab].state.status = "Unknown chord action".to_owned();
+            tabs[*active_tab].state.chord_mode = ChordMode::None;
+        }
+
+        return Ok(());
+    } else if is_leader {
+        // Enter chord mode
+        tabs[*active_tab].state.chord_mode = ChordMode::AwaitingAi;
+        tabs[*active_tab].state.status = String::from("[A] » Awaiting action…");
+        return Ok(());
+    }
 
     // ── Tab management keybindings (no borrows of current tab needed) ──
     match key.code {
@@ -1936,43 +2051,63 @@ fn handle_key_event(
 
     // ── Overlay handling ──────────────────────────────────────────
     if state.overlay.is_some() {
-        // GoTo overlay: capture all input for URL/path entry
-        if state.overlay == Some(jaringan_browser::Overlay::GoTo) {
+        // GoTo / AiAsk / AiFind overlay: capture all input for text entry
+        if state.overlay == Some(jaringan_browser::Overlay::GoTo)
+            || state.overlay == Some(jaringan_browser::Overlay::AiAsk)
+            || state.overlay == Some(jaringan_browser::Overlay::AiFind)
+        {
+            let old_overlay = state.overlay;
             match key.code {
                 KeyCode::Esc => {
                     state.overlay = None;
                     state.goto_buffer.clear();
+                    state.ai_question_buffer.clear();
                     state.goto_history_idx = None;
                     state.status = String::from("Cancelled");
                 }
                 KeyCode::Enter => {
-                    let url = state.goto_buffer.clone();
-                    if !url.is_empty() {
-                        let location = parse_start_location(&url).unwrap_or_else(|_| {
-                            PageLocation::Unsupported(url.clone())
-                        });
-                        if matches!(location, PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) {
-                            match load_location(&location, script_runtime, bridge) {
-                                Ok(loaded) => {
-                                    state.overlay = None;
-                                    navigate_to(state, loaded.location.clone());
-                                    state.record_current(loaded.document.title().unwrap_or("Untitled"));
-                                    update_auth_status(state, &loaded.document);
-                                    state.status = format!("Navigated to {}", url);
-                                    record_goto(&mut state.goto_history, &url);
-                                    *page = loaded;
-                                    *file_mtime = file_mtime_of(&page.location);
+                    if old_overlay == Some(jaringan_browser::Overlay::GoTo) {
+                        let url = state.goto_buffer.clone();
+                        if !url.is_empty() {
+                            let location = parse_start_location(&url).unwrap_or_else(|_| {
+                                PageLocation::Unsupported(url.clone())
+                            });
+                            if matches!(location, PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) {
+                                match load_location(&location, script_runtime, bridge) {
+                                    Ok(loaded) => {
+                                        state.overlay = None;
+                                        navigate_to(state, loaded.location.clone());
+                                        state.record_current(loaded.document.title().unwrap_or("Untitled"));
+                                        update_auth_status(state, &loaded.document);
+                                        state.status = format!("Navigated to {}", url);
+                                        record_goto(&mut state.goto_history, &url);
+                                        *page = loaded;
+                                        *file_mtime = file_mtime_of(&page.location);
+                                    }
+                                    Err(e) => {
+                                        state.status = format!("Failed to load {}: {}", url, e);
+                                    }
                                 }
-                                Err(e) => {
-                                    state.status = format!("Failed to load {}: {}", url, e);
-                                }
+                            } else {
+                                state.status = format!("Unsupported location: {}", url);
                             }
-                        } else {
-                            state.status = format!("Unsupported location: {}", url);
+                        }
+                        state.goto_buffer.clear();
+                        state.goto_history_idx = None;
+                    } else {
+                        let query = state.ai_question_buffer.clone();
+                        if !query.is_empty() {
+                            state.overlay = None;
+                            if old_overlay == Some(jaringan_browser::Overlay::AiAsk) {
+                                state.ai_request = Some("ask".to_owned());
+                                state.status = "AI: Asking…".to_owned();
+                            } else if old_overlay == Some(jaringan_browser::Overlay::AiFind) {
+                                state.ai_request = Some("find".to_owned());
+                                state.status = "AI: Searching…".to_owned();
+                            }
+                            // Keep query in ai_question_buffer so the AI dispatch can read it
                         }
                     }
-                    state.goto_buffer.clear();
-                    state.goto_history_idx = None;
                 }
                 KeyCode::Up | KeyCode::Char('k') if !state.goto_history.is_empty() => {
                     // Cycle backward through goto history
@@ -2006,10 +2141,18 @@ fn handle_key_event(
                     }
                 }
                 KeyCode::Backspace => {
-                    state.goto_buffer.pop();
+                    if old_overlay == Some(jaringan_browser::Overlay::GoTo) {
+                        state.goto_buffer.pop();
+                    } else {
+                        state.ai_question_buffer.pop();
+                    }
                 }
                 KeyCode::Char(ch) if !ch.is_control() => {
-                    state.goto_buffer.push(ch);
+                    if old_overlay == Some(jaringan_browser::Overlay::GoTo) {
+                        state.goto_buffer.push(ch);
+                    } else {
+                        state.ai_question_buffer.push(ch);
+                    }
                 }
                 _ => {}
             }
@@ -2795,6 +2938,12 @@ fn draw_frame(
                     };
                     auth_span
                 },
+                // Chord mode indicator in status bar
+                if state.chord_mode == ChordMode::AwaitingAi {
+                    Span::styled("[A] ", Style::default().fg(Color::Blue))
+                } else {
+                    Span::raw("")
+                },
                 Span::styled(&state.status, Style::default().fg(Color::Yellow)),
                 Span::raw(" · "),
                 Span::styled(format!("{pct}%"), Style::default().fg(Color::DarkGray)),
@@ -2831,6 +2980,8 @@ fn draw_frame(
             draw_page_info_overlay(frame, state, page)
         }
         Some(jaringan_browser::Overlay::GoTo) => draw_goto_overlay(frame, state),
+        Some(jaringan_browser::Overlay::AiAsk) => draw_ai_ask_overlay(frame, state),
+        Some(jaringan_browser::Overlay::AiFind) => draw_ai_find_overlay(frame, state),
         None => {}
     }
 }
@@ -4065,6 +4216,72 @@ fn draw_goto_overlay(frame: &mut ratatui::Frame<'_>, state: &BrowserState) {
 
         frame.render_widget(completion_block, completion_area[1]);
     }
+}
+
+/// Draw the \"Ask about page\" overlay — shows the AI question input bar.
+fn draw_ai_ask_overlay(frame: &mut ratatui::Frame<'_>, state: &BrowserState) {
+    let area = frame.area();
+    let overlay_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(3)])
+        .split(area);
+
+    let cursor_hint = if state.ai_question_buffer.is_empty() {
+        String::from("  Type your question about the page...")
+    } else {
+        String::from("")
+    };
+
+    let text = format!(
+        "Ask: {}{}",
+        state.ai_question_buffer, cursor_hint,
+    );
+
+    let block = Paragraph::new(text)
+        .block(
+            TuiBlock::default()
+                .title(" ❓ Ask about page ")
+                .title_alignment(ratatui::layout::Alignment::Center)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan).bold()),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, overlay_area[1]);
+    frame.render_widget(block, overlay_area[1]);
+}
+
+/// Draw the \"Semantic find\" overlay — shows the search query input bar.
+fn draw_ai_find_overlay(frame: &mut ratatui::Frame<'_>, state: &BrowserState) {
+    let area = frame.area();
+    let overlay_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(3)])
+        .split(area);
+
+    let cursor_hint = if state.ai_question_buffer.is_empty() {
+        String::from("  Type your search query...")
+    } else {
+        String::from("")
+    };
+
+    let text = format!(
+        "Find: {}{}",
+        state.ai_question_buffer, cursor_hint,
+    );
+
+    let block = Paragraph::new(text)
+        .block(
+            TuiBlock::default()
+                .title(" 🔍 Semantic Find ")
+                .title_alignment(ratatui::layout::Alignment::Center)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan).bold()),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, overlay_area[1]);
+    frame.render_widget(block, overlay_area[1]);
 }
 
 /// Scan rendered line text for a query and return the line indices that match.

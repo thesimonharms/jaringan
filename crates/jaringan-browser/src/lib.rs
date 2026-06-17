@@ -4,8 +4,10 @@ use std::fs;
 
 pub mod config;
 pub mod session;
+pub mod ai;
 
 use config::Config;
+use jaringan_core::{Block, Document};
 use jaringan_protocol::JaringanUrl;
 
 /// Jaringan data directory under XDG_DATA_HOME (~/.local/share/jaringan/).
@@ -191,6 +193,13 @@ impl PageLocation {
     }
 }
 
+/// Keyboard chord mode state — we're waiting for a second keypress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChordMode {
+    None,
+    AwaitingAi,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserMode {
     Selection,
@@ -206,6 +215,10 @@ pub enum Overlay {
     Find,
     PageInfo,
     GoTo,
+    /// AI ask-about-page input prompt.
+    AiAsk,
+    /// AI semantic find input prompt.
+    AiFind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,6 +253,7 @@ pub struct TextSelectPos {
 pub struct BrowserState {
     pub current: PageLocation,
     pub mode: BrowserMode,
+    pub chord_mode: ChordMode,
     pub selected: usize,
     pub scroll_offset: u16,
     pub back_stack: Vec<PageLocation>,
@@ -262,6 +276,14 @@ pub struct BrowserState {
     pub text_select_end: TextSelectPos,
     pub has_auth_token: bool,
     pub auth_service_name: Option<String>,
+    /// AI request in progress — used to signal the main loop to spawn a task.
+    pub ai_request: Option<String>,  // None = idle, Some("summarize") etc.
+    /// The AI response text to display when it arrives.
+    pub ai_response: Option<String>,
+    /// Whether AI client is available (API key was found).
+    pub ai_available: bool,
+    /// Buffer for user's AI query input (ask/find overlays).
+    pub ai_question_buffer: String,
 }
 
 impl BrowserState {
@@ -272,6 +294,7 @@ impl BrowserState {
         Self {
             current,
             mode: BrowserMode::Selection,
+            chord_mode: ChordMode::None,
             selected: 0,
             scroll_offset: 0,
             back_stack: Vec::new(),
@@ -298,6 +321,10 @@ impl BrowserState {
             text_select_end: TextSelectPos { row: 0, col: 0 },
             has_auth_token: false,
             auth_service_name: None,
+            ai_request: None,
+            ai_response: None,
+            ai_available: false,
+            ai_question_buffer: String::new(),
         }
     }
 
@@ -315,6 +342,35 @@ impl BrowserState {
             add_bookmark(&mut self.bookmarks, title.to_owned(), url.clone());
             self.status = format!("Bookmarked: {title}");
         }
+    }
+
+    /// Get the rendered text content of a page's (document) blocks.
+    pub fn page_text(page: &Document) -> String {
+        use std::fmt::Write;
+        let mut text = String::new();
+        for block in &page.blocks {
+            match block {
+                Block::Paragraph(s) => {
+                    let _ = writeln!(text, "{s}");
+                }
+                Block::Quote(s) => {
+                    let _ = writeln!(text, "{s}");
+                }
+                Block::Heading { text: heading_text, .. } => {
+                    let _ = writeln!(text, "{heading_text}");
+                }
+                Block::Preformatted { code, .. } => {
+                    let _ = writeln!(text, "{code}");
+                }
+                Block::List(items) => {
+                    for item in items {
+                        let _ = writeln!(text, "{item}");
+                    }
+                }
+                _ => {}
+            }
+        }
+        text
     }
 }
 

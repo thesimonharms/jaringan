@@ -38,6 +38,7 @@ tokio = { version = "1.38", features = ["full"] }
 tokio-stream = "0.1"
 url = "2.5"
 
+baochuan = { path = "../baochuan" }
 jaringan-core = { path = "crates/jaringan-core" }
 jaringan-gateway = { path = "crates/jaringan-gateway" }
 jaringan-plugins = { path = "crates/jaringan-plugins" }
