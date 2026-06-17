@@ -2825,6 +2825,7 @@ fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage, script_run
                 }
                 navigate_to(state, loaded.location.clone());
                 state.record_current(loaded.document.title().unwrap_or("Untitled"));
+                update_auth_status(state, &loaded.document);
                 state.status = format!("Opened {label}");
                 *page = loaded;
             }
@@ -2923,6 +2924,7 @@ fn activate_button(
                 body_size: 0,
                 load_time_ms: 0,
             };
+            update_auth_status(state, &page.document);
         }
         (PageLocation::File(current_file), ActionMethod::Post) => {
             let root = current_file.parent().unwrap_or_else(|| Path::new("."));
@@ -2956,6 +2958,7 @@ fn activate_button(
                 body_size: 0,
                 load_time_ms: 0,
             };
+            update_auth_status(state, &page.document);
         }
         (PageLocation::File(current_file), ActionMethod::Get) if target == "/search" => {
             let root = current_file.parent().unwrap_or_else(|| Path::new("."));

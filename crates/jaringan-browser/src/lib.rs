@@ -371,6 +371,14 @@ pub fn navigate_to(state: &mut BrowserState, next: PageLocation) {
     state.selected = 0;
     state.scroll_offset = 0;
     state.overlay = None;
+    state.find_state = FindState {
+        query: String::new(),
+        matches: Vec::new(),
+        match_idx: 0,
+    };
+    state.pending_confirmation = None;
+    state.pending_download = None;
+    state.text_select_active = false;
     state.status = String::from("Loaded");
 }
 
