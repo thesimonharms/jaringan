@@ -2013,11 +2013,15 @@ fn handle_key_event(
             return Ok(());
         }
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('h') | KeyCode::Char('?') => {
+            KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('h') | KeyCode::Char('?')
+                if state.overlay != Some(jaringan_browser::Overlay::Find) =>
+            {
                 state.overlay = None;
                 state.status = String::from("Closed");
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down | KeyCode::Char('j')
+                if state.overlay != Some(jaringan_browser::Overlay::Find) =>
+            {
                 let count = match state.overlay {
                     Some(jaringan_browser::Overlay::History) => state.history.len(),
                     Some(jaringan_browser::Overlay::Bookmarks) => state.bookmarks.len(),
@@ -2027,13 +2031,16 @@ fn handle_key_event(
                     state.overlay_selected = (state.overlay_selected + 1).min(count - 1);
                 }
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up | KeyCode::Char('k')
+                if state.overlay != Some(jaringan_browser::Overlay::Find) =>
+            {
                 state.overlay_selected = state.overlay_selected.saturating_sub(1);
             }
             KeyCode::Enter => {
                 let url = match state.overlay {
                     Some(jaringan_browser::Overlay::History) => {
-                        state.history.get(state.overlay_selected).map(|e| e.url.clone())
+                        let rev_idx = state.history.len().saturating_sub(1).saturating_sub(state.overlay_selected);
+                        state.history.get(rev_idx).map(|e| e.url.clone())
                     }
                     Some(jaringan_browser::Overlay::Bookmarks) => {
                         state.bookmarks.get(state.overlay_selected).map(|b| b.url.clone())
@@ -2076,6 +2083,7 @@ fn handle_key_event(
             }
             _ => {}
         }
+        tabs[*active_tab] = tab;
         return Ok(());
     }
 
@@ -2145,7 +2153,7 @@ fn handle_key_event(
 
     // ── Main keybindings ──────────────────────────────────────────
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => {
+        KeyCode::Char('q') | KeyCode::Esc if !is_selected_input(page, state.selected) => {
             // Save tabs before quitting if persistence enabled
             if state.config.tab_persistence {
                 let saved: Vec<SavedTab> = tabs
@@ -2184,7 +2192,7 @@ fn handle_key_event(
         KeyCode::Char('h') => toggle_overlay(state, jaringan_browser::Overlay::Help),
         KeyCode::Char('H') => toggle_overlay(state, jaringan_browser::Overlay::History),
         KeyCode::Char('B') => toggle_overlay(state, jaringan_browser::Overlay::Bookmarks),
-        KeyCode::Char('y') => {
+        KeyCode::Char('y') if state.pending_download.is_none() => {
             let url = state.current.display_url();
             if copy_to_clipboard(&url) {
                 state.status = "Copied URL to clipboard".to_string();
@@ -5059,6 +5067,7 @@ fn is_renderable_content_type(ct: &str) -> bool {
         || ct.contains("json")
         || ct.starts_with("dir")
         || ct.is_empty()
+        || ct.contains("error")
 }
 
 /// Suggest a filename from a URL path.
