@@ -17,6 +17,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use crossterm::event::{EnableMouseCapture, DisableMouseCapture};
+use jaringan_browser::config::key_matches_binding;
 use jaringan_browser::{
     ActionConfirmation, BrowserMode, BrowserState, DownloadPrompt, FindState, PageLocation, SavedTab, TextSelectPos,
     cache_filename_for_url, config::parse_color, go_back, go_forward, load_tabs, navigate_to,
@@ -1564,6 +1565,7 @@ fn block_summary_json(block: &Block) -> serde_json::Value {
 }
 
 fn run_tui(targets: Vec<String>) -> anyhow::Result<()> {
+    let _cfg = jaringan_browser::config::ensure_defaults();
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -1584,10 +1586,7 @@ fn run_app(
     targets: Vec<String>,
 ) -> anyhow::Result<()> {
     // Load config
-    let cfg = jaringan_browser::config::load()
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let cfg = jaringan_browser::config::ensure_defaults();
 
     // Apply data_dir override from config
     if let Some(ref data_dir) = cfg.data_dir {
@@ -1853,7 +1852,8 @@ fn handle_key_event(
 
     // ── Tab management keybindings (no borrows of current tab needed) ──
     match key.code {
-        KeyCode::Char('t') if ctrl => {
+        code if key_matches_binding(&key, &tabs[*active_tab].state.config.keybindings.new_tab)
+            && !tabs[*active_tab].state.config.keybindings.new_tab.is_empty() => {
             let doc = welcome_document();
             let p = LoadedPage {
                 location: PageLocation::File(PathBuf::from("welcome")),
@@ -1876,18 +1876,21 @@ fn handle_key_event(
             *active_tab = tabs.len() - 1;
             return Ok(());
         }
-        KeyCode::Char('w') if ctrl && tabs.len() > 1 => {
+        code if key_matches_binding(&key, &tabs[*active_tab].state.config.keybindings.close_tab)
+            && tabs.len() > 1 => {
             tabs.remove(*active_tab);
             if *active_tab >= tabs.len() {
                 *active_tab = tabs.len() - 1;
             }
             return Ok(());
         }
-        KeyCode::Tab if ctrl && tabs.len() > 1 => {
+        code if key_matches_binding(&key, &tabs[*active_tab].state.config.keybindings.next_tab)
+            && tabs.len() > 1 => {
             *active_tab = (*active_tab + 1) % tabs.len();
             return Ok(());
         }
-        KeyCode::BackTab if ctrl && tabs.len() > 1 => {
+        code if key_matches_binding(&key, &tabs[*active_tab].state.config.keybindings.prev_tab)
+            && tabs.len() > 1 => {
             *active_tab = if *active_tab == 0 {
                 tabs.len() - 1
             } else {
@@ -1896,12 +1899,14 @@ fn handle_key_event(
             return Ok(());
         }
         // Ctrl+Shift+Left/Right: reorder tabs
-        KeyCode::Left if ctrl && shift && *active_tab > 0 => {
+        code if key_matches_binding(&key, &tabs[*active_tab].state.config.keybindings.tab_move_left)
+            && *active_tab > 0 => {
             tabs.swap(*active_tab, *active_tab - 1);
             *active_tab -= 1;
             return Ok(());
         }
-        KeyCode::Right if ctrl && shift && *active_tab + 1 < tabs.len() => {
+        code if key_matches_binding(&key, &tabs[*active_tab].state.config.keybindings.tab_move_right)
+            && *active_tab + 1 < tabs.len() => {
             tabs.swap(*active_tab, *active_tab + 1);
             *active_tab += 1;
             return Ok(());
@@ -2013,8 +2018,11 @@ fn handle_key_event(
             return Ok(());
         }
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('h') | KeyCode::Char('?')
-                if state.overlay != Some(jaringan_browser::Overlay::Find) =>
+            code if (key_matches_binding(&key, &state.config.keybindings.help)
+                || key_matches_binding(&key, &state.config.keybindings.help_alt)
+                || key_matches_binding(&key, &state.config.keybindings.quit)
+                || key_matches_binding(&key, &state.config.keybindings.quit_esc))
+                && state.overlay != Some(jaringan_browser::Overlay::Find) =>
             {
                 state.overlay = None;
                 state.status = String::from("Closed");
@@ -2090,7 +2098,7 @@ fn handle_key_event(
     // ── Text selection mode ────────────────────────────────────────
     if state.text_select_active {
         match key.code {
-            KeyCode::Char('V') | KeyCode::Esc => {
+            code if key_matches_binding(&key, &state.config.keybindings.text_select_exit) => {
                 state.text_select_active = false;
                 state.status = String::from("Text selection off");
             }
@@ -2153,7 +2161,10 @@ fn handle_key_event(
 
     // ── Main keybindings ──────────────────────────────────────────
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc if !is_selected_input(page, state.selected) => {
+        code if (key_matches_binding(&key, &state.config.keybindings.quit)
+            || key_matches_binding(&key, &state.config.keybindings.quit_esc))
+            && !is_selected_input(page, state.selected) =>
+        {
             // Save tabs before quitting if persistence enabled
             if state.config.tab_persistence {
                 let saved: Vec<SavedTab> = tabs
@@ -2180,19 +2191,33 @@ fn handle_key_event(
             edit_selected_input(state, page, InputEdit::Backspace);
         }
         KeyCode::Tab => toggle_mode(state),
-        KeyCode::Char('s') => switch_mode(state, BrowserMode::Scroll),
-        KeyCode::Char('v') => switch_mode(state, BrowserMode::Selection),
-        KeyCode::Char('V') => {
+        code if key_matches_binding(&key, &state.config.keybindings.scroll_mode) => {
+            switch_mode(state, BrowserMode::Scroll);
+        }
+        code if key_matches_binding(&key, &state.config.keybindings.selection_mode) => {
+            switch_mode(state, BrowserMode::Selection);
+        }
+        code if key_matches_binding(&key, &state.config.keybindings.text_selection) => {
             state.text_select_active = true;
             state.text_select_start = TextSelectPos { row: 0, col: 0 };
             state.text_select_end = TextSelectPos { row: 0, col: 0 };
             state.status = String::from("Text selection: h/j/k/l to move, y to copy, Esc to cancel");
         }
-        KeyCode::Char('?') => toggle_overlay(state, jaringan_browser::Overlay::Help),
-        KeyCode::Char('h') => toggle_overlay(state, jaringan_browser::Overlay::Help),
-        KeyCode::Char('H') => toggle_overlay(state, jaringan_browser::Overlay::History),
-        KeyCode::Char('B') => toggle_overlay(state, jaringan_browser::Overlay::Bookmarks),
-        KeyCode::Char('y') if state.pending_download.is_none() => {
+        code if key_matches_binding(&key, &state.config.keybindings.help) => {
+            toggle_overlay(state, jaringan_browser::Overlay::Help);
+        }
+        code if key_matches_binding(&key, &state.config.keybindings.help_alt) => {
+            toggle_overlay(state, jaringan_browser::Overlay::Help);
+        }
+        code if key_matches_binding(&key, &state.config.keybindings.history) => {
+            toggle_overlay(state, jaringan_browser::Overlay::History);
+        }
+        code if key_matches_binding(&key, &state.config.keybindings.bookmarks) => {
+            toggle_overlay(state, jaringan_browser::Overlay::Bookmarks);
+        }
+        code if key_matches_binding(&key, &state.config.keybindings.copy_url)
+            && state.pending_download.is_none() =>
+        {
             let url = state.current.display_url();
             if copy_to_clipboard(&url) {
                 state.status = "Copied URL to clipboard".to_string();
@@ -2200,7 +2225,7 @@ fn handle_key_event(
                 state.status = format!("Copy not available: {}", url);
             }
         }
-        KeyCode::Char('\\') | KeyCode::Char('u') if ctrl => {
+        code if key_matches_binding(&key, &state.config.keybindings.source_view) => {
             state.show_source = !state.show_source;
             state.status = if state.show_source {
                 "Source view".to_string()
@@ -2208,7 +2233,7 @@ fn handle_key_event(
                 "Rendered view".to_string()
             };
         }
-        KeyCode::Char('f') if ctrl => {
+        code if key_matches_binding(&key, &state.config.keybindings.find) => {
             toggle_overlay(state, jaringan_browser::Overlay::Find);
             state.find_state = jaringan_browser::FindState {
                 query: String::new(),
@@ -2216,7 +2241,9 @@ fn handle_key_event(
                 match_idx: 0,
             };
         }
-        KeyCode::Down | KeyCode::Char('j') => match state.mode {
+        code if key_matches_binding(&key, &state.config.keybindings.scroll_down)
+            || key_matches_binding(&key, &state.config.keybindings.scroll_down_alt) =>
+        match state.mode {
             BrowserMode::Selection => selection_down(state, page.items.len()),
             BrowserMode::Scroll => {
                 let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source).len();
@@ -2226,11 +2253,15 @@ fn handle_key_event(
                 }
             }
         },
-        KeyCode::Up | KeyCode::Char('k') => match state.mode {
+        code if key_matches_binding(&key, &state.config.keybindings.scroll_up)
+            || key_matches_binding(&key, &state.config.keybindings.scroll_up_alt) =>
+        match state.mode {
             BrowserMode::Selection => selection_up(state),
             BrowserMode::Scroll => scroll_up(state),
         },
-        KeyCode::PageDown | KeyCode::Char(' ') => match state.mode {
+        code if key_matches_binding(&key, &state.config.keybindings.page_down)
+            || key_matches_binding(&key, &state.config.keybindings.page_down_alt) =>
+        match state.mode {
             BrowserMode::Selection => selection_down(state, page.items.len()),
             BrowserMode::Scroll => {
                 let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source).len();
@@ -2240,7 +2271,8 @@ fn handle_key_event(
                 }
             }
         },
-        KeyCode::PageUp => match state.mode {
+        code if key_matches_binding(&key, &state.config.keybindings.page_up) =>
+        match state.mode {
             BrowserMode::Selection => selection_up(state),
             BrowserMode::Scroll => {
                 let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source).len();
@@ -2264,28 +2296,28 @@ fn handle_key_event(
                 }
             }
         },
-        KeyCode::Char('g') if !ctrl => {
+        code if key_matches_binding(&key, &state.config.keybindings.goto) => {
             state.overlay = Some(jaringan_browser::Overlay::GoTo);
             state.goto_buffer.clear();
             state.status = String::from("Go to: (type URL or path, Enter to go, Esc to cancel)");
         }
-        KeyCode::Char('G') => {
+        code if key_matches_binding(&key, &state.config.keybindings.scroll_bottom) => {
             let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source).len();
             if let Ok(size) = terminal.size() {
                 let viewport_height = size.height.saturating_sub(8);
                 scroll_to_bottom(state, line_count, viewport_height);
             }
         }
-        KeyCode::Char('d') if ctrl => {
+        code if key_matches_binding(&key, &state.config.keybindings.bookmark_toggle) => {
             state.toggle_bookmark_current(page.document.title().unwrap_or("Untitled"));
         }
-        KeyCode::Char('i') if ctrl => {
+        code if key_matches_binding(&key, &state.config.keybindings.page_info) => {
             toggle_overlay(state, jaringan_browser::Overlay::PageInfo);
         }
-        KeyCode::Char('l') if ctrl => {
+        code if key_matches_binding(&key, &state.config.keybindings.clear_screen) => {
             terminal.clear()?;
         }
-        KeyCode::Enter if ctrl => {
+        code if key_matches_binding(&key, &state.config.keybindings.open_new_tab) => {
             // Ctrl+Enter: open link/button in a new background tab
             let Some(item) = page.items.get(state.selected).cloned() else {
                 state.status = String::from("No selectable item");
@@ -2346,7 +2378,9 @@ fn handle_key_event(
             activate_selected(state, page, script_runtime, bridge)?;
             *file_mtime = file_mtime_of(&page.location);
         }
-        KeyCode::Char('b') | KeyCode::Backspace => {
+        code if key_matches_binding(&key, &state.config.keybindings.back)
+            || key_matches_binding(&key, &state.config.keybindings.back_alt) =>
+        {
             if go_back(state) {
                 match &state.current {
                     location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
@@ -2360,7 +2394,7 @@ fn handle_key_event(
                 }
             }
         }
-        KeyCode::Char('f') if !ctrl => {
+        code if key_matches_binding(&key, &state.config.keybindings.forward) => {
             if go_forward(state) {
                 match &state.current {
                     location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
@@ -2374,14 +2408,16 @@ fn handle_key_event(
                 }
             }
         }
-        KeyCode::Char('r') => {
+        code if key_matches_binding(&key, &state.config.keybindings.reload) => {
             let loaded = load_location(&page.location, script_runtime, bridge)?;
             *page = loaded;
             *file_mtime = file_mtime_of(&page.location);
             state.status = String::from("Reloaded");
             update_auth_status(state, &page.document);
         }
-        KeyCode::Char('n') if ctrl && state.overlay == Some(jaringan_browser::Overlay::Find) => {
+        code if key_matches_binding(&key, &state.config.keybindings.find_next)
+            && state.overlay == Some(jaringan_browser::Overlay::Find) =>
+        {
             // Next match in find mode
             if !state.find_state.matches.is_empty() {
                 state.find_state.match_idx =
@@ -2393,7 +2429,9 @@ fn handle_key_event(
                 );
             }
         }
-        KeyCode::Char('p') if ctrl && state.overlay == Some(jaringan_browser::Overlay::Find) => {
+        code if key_matches_binding(&key, &state.config.keybindings.find_prev)
+            && state.overlay == Some(jaringan_browser::Overlay::Find) =>
+        {
             // Previous match in find mode
             if !state.find_state.matches.is_empty() {
                 state.find_state.match_idx = if state.find_state.match_idx == 0 {
@@ -2409,9 +2447,7 @@ fn handle_key_event(
             }
         }
         // Plugin reload: Ctrl+Shift+R — hot-reload all WASM plugins
-        KeyCode::Char('R')
-            if ctrl
-                && key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) =>
+        code if key_matches_binding(&key, &state.config.keybindings.plugin_reload) =>
         {
             if let Err(e) = plugin_registry.load_all() {
                 state.status = format!("Plugin reload failed: {e}");
