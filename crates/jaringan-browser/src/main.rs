@@ -2537,11 +2537,25 @@ fn handle_key_event(
             if go_back(state) {
                 match &state.current {
                     location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
-                        let loaded = load_location(location, script_runtime, bridge)?;
-                        *page = loaded;
-                        *file_mtime = file_mtime_of(&page.location);
-                        state.record_current(page.document.title().unwrap_or("Untitled"));
-                        update_auth_status(state, &page.document);
+                        match load_location(location, script_runtime, bridge) {
+                            Ok(loaded) => {
+                                *page = loaded;
+                                *file_mtime = file_mtime_of(&page.location);
+                                state.record_current(page.document.title().unwrap_or("Untitled"));
+                                update_auth_status(state, &page.document);
+                            }
+                            Err(e) => {
+                                state.status = format!("Back failed: {e}");
+                                // Undo the back navigation
+                                let prev = state.back_stack.pop();
+                                if let Some(p) = state.forward_stack.pop() {
+                                    state.back_stack.push(p);
+                                }
+                                if let Some(prev_loc) = prev {
+                                    state.current = prev_loc;
+                                }
+                            }
+                        }
                     }
                     PageLocation::Unsupported(_) => {}
                 }
@@ -2551,22 +2565,42 @@ fn handle_key_event(
             if go_forward(state) {
                 match &state.current {
                     location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
-                        let loaded = load_location(location, script_runtime, bridge)?;
-                        *page = loaded;
-                        *file_mtime = file_mtime_of(&page.location);
-                        state.record_current(page.document.title().unwrap_or("Untitled"));
-                        update_auth_status(state, &page.document);
+                        match load_location(location, script_runtime, bridge) {
+                            Ok(loaded) => {
+                                *page = loaded;
+                                *file_mtime = file_mtime_of(&page.location);
+                                state.record_current(page.document.title().unwrap_or("Untitled"));
+                                update_auth_status(state, &page.document);
+                            }
+                            Err(e) => {
+                                state.status = format!("Forward failed: {e}");
+                                // Undo the forward navigation
+                                let prev = state.forward_stack.pop();
+                                if let Some(p) = state.back_stack.pop() {
+                                    state.forward_stack.push(p);
+                                }
+                                if let Some(prev_loc) = prev {
+                                    state.current = prev_loc;
+                                }
+                            }
+                        }
                     }
                     PageLocation::Unsupported(_) => {}
                 }
             }
         }
         code if key_matches_binding(&key, &state.config.keybindings.reload) => {
-            let loaded = load_location(&page.location, script_runtime, bridge)?;
-            *page = loaded;
-            *file_mtime = file_mtime_of(&page.location);
-            state.status = String::from("Reloaded");
-            update_auth_status(state, &page.document);
+            match load_location(&page.location, script_runtime, bridge) {
+                Ok(loaded) => {
+                    *page = loaded;
+                    *file_mtime = file_mtime_of(&page.location);
+                    state.status = String::from("Reloaded");
+                    update_auth_status(state, &page.document);
+                }
+                Err(e) => {
+                    state.status = format!("Reload failed: {e}");
+                }
+            }
         }
         code if key_matches_binding(&key, &state.config.keybindings.find_next)
             && state.overlay == Some(jaringan_browser::Overlay::Find) =>
@@ -3053,7 +3087,13 @@ fn activate_selected(state: &mut BrowserState, page: &mut LoadedPage, script_run
         InteractiveItem::Link { label, target } => match resolve_target(&page.location, &target) {
             location @ (PageLocation::File(_) | PageLocation::Network(_) | PageLocation::Web(_)) => {
                 state.status = format!("⠋ Loading {}", location.display_url());
-                let loaded = load_location(&location, script_runtime, bridge)?;
+                let loaded = match load_location(&location, script_runtime, bridge) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        state.status = format!("Failed to load {label}: {e}");
+                        return Ok(());
+                    }
+                };
                 if !is_renderable_content_type(&loaded.content_type) {
                     // Non-renderable content — offer to download
                     let url = location.display_url();
