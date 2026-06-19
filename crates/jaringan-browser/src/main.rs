@@ -1897,7 +1897,10 @@ fn run_app(
             Event::Mouse(mouse) if cfg.enable_mouse => {
                 handle_mouse_event(&mut tabs, &mut active_tab, mouse, &script_runtime, &bridge)?;
             }
-            Event::Resize(_, _) => {}
+            Event::Resize(_width, _height) => {
+                let _ = terminal.clear();
+                tabs[active_tab].state.status = String::from("Resized");
+            }
             _ => {}
         }
     }
@@ -2270,7 +2273,8 @@ fn handle_key_event(
             KeyCode::Char('y') | KeyCode::Enter => {
                 // Build the selected text from rendered lines
                 let find_color = find_color_for(state);
-                let lines = render_lines(page, state.selected, &state.find_state, find_color, state.show_source);
+                let bw = body_width_from_size(terminal.size().map(|s| s.width).unwrap_or(80));
+                let lines = render_lines(page, state.selected, &state.find_state, find_color, state.show_source, bw);
                 let selected_text = extract_selected_text(&lines, state.text_select_start, state.text_select_end);
                 if !selected_text.is_empty() {
                     if copy_to_clipboard(&selected_text) {
@@ -2293,7 +2297,8 @@ fn handle_key_event(
             KeyCode::Char('G') => {
                 // G → go to last line
                 let find_color = find_color_for(state);
-                let line_count = render_lines(page, state.selected, &state.find_state, find_color, state.show_source).len();
+                let __bw2 = body_width_from_size(crossterm::terminal::size().map(|s| s.0).unwrap_or(80));
+                let line_count = render_lines(page, state.selected, &state.find_state, find_color, state.show_source, __bw2).len();
                 state.text_select_end.row = line_count.saturating_sub(1) as u16;
             }
             _ => {}
@@ -2389,7 +2394,8 @@ fn handle_key_event(
         match state.mode {
             BrowserMode::Selection => selection_down(state, page.items.len()),
             BrowserMode::Scroll => {
-                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source).len();
+                let __bw = body_width_from_size(terminal.size().map(|s| s.width).unwrap_or(80));
+                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source, __bw).len();
                 if let Ok(size) = terminal.size() {
                     let viewport_height = size.height.saturating_sub(8);
                     scroll_down(state, line_count, viewport_height);
@@ -2407,7 +2413,8 @@ fn handle_key_event(
         match state.mode {
             BrowserMode::Selection => selection_down(state, page.items.len()),
             BrowserMode::Scroll => {
-                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source).len();
+                let __bw = body_width_from_size(terminal.size().map(|s| s.width).unwrap_or(80));
+                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source, __bw).len();
                 if let Ok(size) = terminal.size() {
                     let viewport_height = size.height.saturating_sub(8);
                     scroll_page_down(state, line_count, viewport_height);
@@ -2418,7 +2425,8 @@ fn handle_key_event(
         match state.mode {
             BrowserMode::Selection => selection_up(state),
             BrowserMode::Scroll => {
-                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source).len();
+                let __bw = body_width_from_size(terminal.size().map(|s| s.width).unwrap_or(80));
+                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source, __bw).len();
                 if let Ok(size) = terminal.size() {
                     let viewport_height = size.height.saturating_sub(8);
                     scroll_page_up(state, line_count, viewport_height);
@@ -2432,7 +2440,8 @@ fn handle_key_event(
         KeyCode::End => match state.mode {
             BrowserMode::Selection => selection_last(state, page.items.len()),
             BrowserMode::Scroll => {
-                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source).len();
+                let __bw = body_width_from_size(terminal.size().map(|s| s.width).unwrap_or(80));
+                let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source, __bw).len();
                 if let Ok(size) = terminal.size() {
                     let viewport_height = size.height.saturating_sub(8);
                     scroll_to_bottom(state, line_count, viewport_height);
@@ -2445,7 +2454,8 @@ fn handle_key_event(
             state.status = String::from("Go to: (type URL or path, Enter to go, Esc to cancel)");
         }
         code if key_matches_binding(&key, &state.config.keybindings.scroll_bottom) => {
-            let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source).len();
+            let __bw = body_width_from_size(terminal.size().map(|s| s.width).unwrap_or(80));
+            let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source, __bw).len();
             if let Ok(size) = terminal.size() {
                 let viewport_height = size.height.saturating_sub(8);
                 scroll_to_bottom(state, line_count, viewport_height);
@@ -2653,7 +2663,8 @@ fn handle_mouse_event(
             let page = &mut tab.page;
             if state.mode == BrowserMode::Scroll {
                 let find_color = find_color_for(state);
-                let line_count = render_lines(page, state.selected, &state.find_state, find_color, state.show_source).len();
+                let __bw2 = body_width_from_size(crossterm::terminal::size().map(|s| s.0).unwrap_or(80));
+                let line_count = render_lines(page, state.selected, &state.find_state, find_color, state.show_source, __bw2).len();
                 if let Ok(size) = crossterm::terminal::size() {
                     let viewport_height = size.1.saturating_sub(8);
                     scroll_down(state, line_count, viewport_height);
@@ -2808,14 +2819,19 @@ fn draw_frame(
     let accent = parse_color(&cfg.theme.accent);
     let border_color = parse_color(&cfg.theme.border);
 
+    // Compact layout for small terminals (< 22 lines)
+    let compact = area.height < 22;
+    let header_len = if compact { 2 } else { 3 };
+    let footer_len = if compact { 2 } else { 3 };
+
     // Tab bar takes 1 line at the top
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // tab bar
-            Constraint::Length(3), // header
-            Constraint::Min(6),    // body
-            Constraint::Length(3), // footer
+            Constraint::Length(1),        // tab bar
+            Constraint::Length(header_len), // header
+            Constraint::Min(6),           // body
+            Constraint::Length(footer_len), // footer
         ])
         .split(area);
 
@@ -2838,14 +2854,16 @@ fn draw_frame(
     ]))
     .block(
         TuiBlock::default()
-            .borders(Borders::ALL)
+            .borders(if compact { Borders::BOTTOM } else { Borders::ALL })
             .border_style(Style::default().fg(accent)),
     );
     frame.render_widget(header, main_chunks[1]);
 
     // ── Body ───────────────────────────────────────────────────────
     let find_color = parse_color(&cfg.theme.find_highlight);
-    let mut body_lines = render_lines(page, state.selected, &state.find_state, find_color, state.show_source);
+    let body_area = main_chunks[2];
+    let bw = body_width_from_size(body_area.width);
+    let mut body_lines = render_lines(page, state.selected, &state.find_state, find_color, state.show_source, bw);
     // Apply text selection highlight if active
     if state.text_select_active {
         apply_text_selection(&mut body_lines, state.text_select_start, state.text_select_end);
@@ -2879,7 +2897,7 @@ fn draw_frame(
         }
     };
 
-    let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source).len();
+    let line_count = render_lines(page, state.selected, &state.find_state, find_color_for(state), state.show_source, bw).len();
     let viewport_height = main_chunks[2].height.saturating_sub(2);
     let pct = if line_count > viewport_height as usize {
         ((state.scroll_offset as f64)
@@ -2965,7 +2983,7 @@ fn draw_frame(
             ]))
     .block(
         TuiBlock::default()
-            .borders(Borders::ALL)
+            .borders(if compact { Borders::TOP } else { Borders::ALL })
             .border_style(Style::default().fg(accent)),
     );
     frame.render_widget(footer, main_chunks[3]);
@@ -4296,7 +4314,7 @@ fn compute_find_matches(page: &LoadedPage, query: &str) -> Vec<usize> {
         matches: Vec::new(),
         match_idx: 0,
     };
-    let lines = render_lines(page, 0, &dummy, Color::Reset, false);
+    let lines = render_lines(page, 0, &dummy, Color::Reset, false, 80);
     lines
         .iter()
         .enumerate()
@@ -4315,6 +4333,7 @@ fn draw_page_info_overlay(
     page: &LoadedPage,
 ) {
     let area = frame.area();
+    let bw = body_width_from_size(area.width);
     let overlay_area = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -4333,7 +4352,7 @@ fn draw_page_info_overlay(
         matches: Vec::new(),
         match_idx: 0,
     };
-    let line_count = render_lines(page, state.selected, &dummy, Color::Reset, false).len();
+    let line_count = render_lines(page, state.selected, &dummy, Color::Reset, false, bw).len();
 
     let text = format!(
         "  Title: {title}\n  \
@@ -4366,7 +4385,7 @@ fn draw_page_info_overlay(
     frame.render_widget(block, overlay_area[1]);
 }
 
-fn render_lines(page: &LoadedPage, selected: usize, find_state: &FindState, find_color: Color, show_source: bool) -> Vec<Line<'static>> {
+fn render_lines(page: &LoadedPage, selected: usize, find_state: &FindState, find_color: Color, show_source: bool, body_width: usize) -> Vec<Line<'static>> {
     if show_source
         && let Some(ref raw) = page.raw_body {
             let mut lines = vec![
@@ -4509,7 +4528,7 @@ fn render_lines(page: &LoadedPage, selected: usize, find_state: &FindState, find
                 lines.push(Line::raw(""));
             }
             Block::Table(table) => {
-                for line in render_browser_table(table) {
+                for line in render_browser_table(table, body_width) {
                     lines.push(line);
                 }
                 lines.push(Line::raw(""));
@@ -4648,9 +4667,11 @@ fn apply_col_range_highlight(line: &mut Line<'static>, col_start: usize, col_end
     }
 }
 
-fn render_browser_table(table: &Table) -> Vec<Line<'static>> {
-    const MAX_COL_WIDTH: usize = 40;
+fn render_browser_table(table: &Table, available_width: usize) -> Vec<Line<'static>> {
+    // Minimum width for a column (padding + border chars)
+    let min_col = 3; // " x " with room
 
+    // Available width accounts for left margin (2) + separators between columns + borders
     let columns = table
         .headers
         .len()
@@ -4659,8 +4680,19 @@ fn render_browser_table(table: &Table) -> Vec<Line<'static>> {
         return Vec::new();
     }
 
-    // Compute column widths (clamped to MAX_COL_WIDTH)
-    let widths: Vec<usize> = (0..columns)
+    // Outer chars: 2 (left margin) + 1 (left border) + 1 (right border) = 4
+    // Between columns: each gap is 1 (border char)
+    let outer_overhead: usize = 4;
+    let between_overhead: usize = if columns > 1 { columns - 1 } else { 0 };
+    let available_for_content = available_width.saturating_sub(outer_overhead + between_overhead);
+
+    if available_for_content < columns * min_col {
+        // Too narrow — render a single-column fallback
+        return render_browser_table_fallback(table, available_width);
+    }
+
+    // Get raw content widths per column
+    let raw_widths: Vec<usize> = (0..columns)
         .map(|col| {
             let header_w = table.headers.get(col).map(|h| h.chars().count()).unwrap_or(0);
             let max_row_w = table
@@ -4673,9 +4705,25 @@ fn render_browser_table(table: &Table) -> Vec<Line<'static>> {
                 })
                 .max()
                 .unwrap_or(0);
-            header_w.max(max_row_w).min(MAX_COL_WIDTH)
+            header_w.max(max_row_w)
         })
         .collect();
+
+    let total_raw: usize = raw_widths.iter().sum();
+
+    // Distribute available space proportionally, respecting min_col
+    let widths: Vec<usize> = if total_raw <= available_for_content {
+        // Everything fits — use natural widths
+        raw_widths
+    } else {
+        // Scale down proportionally, respecting min_col per column
+        let max_width = available_for_content.saturating_sub((columns - 1) * min_col);
+        let scale = max_width as f64 / total_raw as f64;
+        raw_widths.iter().map(|&w| {
+            let scaled = (w as f64 * scale).round() as usize;
+            scaled.max(min_col)
+        }).collect()
+    };
 
     let mut lines = Vec::new();
 
@@ -4783,6 +4831,46 @@ fn browser_table_row_separator(widths: &[usize]) -> String {
         .collect::<Vec<_>>()
         .join("┼");
     format!("  ├{cells}┤")
+}
+
+/// Fallback table renderer for narrow terminals.
+/// Renders each row as "key: value" pairs instead of columns.
+fn render_browser_table_fallback(table: &Table, _available_width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    // Headers as a single row if there are any
+    if !table.headers.is_empty() {
+        let header_line: Vec<Span> = table.headers.iter().enumerate().map(|(_i, h)| {
+            Span::styled(
+                format!("▸ {} ", h),
+                Style::default().fg(Color::Cyan).bold(),
+            )
+        }).collect();
+        lines.push(Line::from(header_line));
+        lines.push(Line::raw(""));
+    }
+
+    for (_row_idx, row) in table.rows.iter().enumerate() {
+        let is_even = _row_idx % 2 == 0;
+        for (col, cell) in row.iter().enumerate() {
+            let label = table.headers.get(col).map(|h| h.as_str()).unwrap_or("");
+            let bg = if is_even { Color::Rgb(30, 30, 40) } else { Color::Reset };
+            let style = Style::default().fg(Color::DarkGray).bg(bg);
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {label}: "), style),
+                Span::styled(cell.clone(), Style::default().fg(Color::White).bg(bg)),
+            ]));
+        }
+        lines.push(Line::raw(""));
+    }
+
+    lines
+}
+
+/// Get the approximate body content width from the terminal.
+/// Subtracts left/right borders (2) and margins (2).
+fn body_width_from_size(width: u16) -> usize {
+    (width as usize).saturating_sub(4).max(20)
 }
 
 fn selectable_line(selected: bool, label: String, target: String, color: Color) -> Line<'static> {
@@ -5662,7 +5750,7 @@ mod tests {
             query: String::new(),
             matches: Vec::new(),
             match_idx: 0,
-        }, Color::Reset, false)
+        }, Color::Reset, false, 80)
             .into_iter()
             .map(|line| {
                 line.spans
